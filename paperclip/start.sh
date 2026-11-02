@@ -5,6 +5,7 @@
 B=$(cd "$(dirname "$0")" && pwd)
 chmod -R a+rX "$B"
 echo "[paperclip-cloudcli] Paperclip service, code $(printf %.7s "${RAILWAY_GIT_COMMIT_SHA:-unknown}")"
+echo "[paperclip-cloudcli] What changed: https://github.com/mikedepo/paperclip-cloudcli/blob/main/CHANGELOG.md"
 
 # git uses a GitHub token from the environment for github.com, whatever HOME a run has (Paperclip's own AI sign-ins give
 # each run its own HOME): GH_TOKEN from Variables, or GH_TOKEN bound on the Runner from the GITHUB_TOKEN company secret

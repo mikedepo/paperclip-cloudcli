@@ -6,6 +6,7 @@
 B=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 chmod -R a+rX "$B"
 echo "[paperclip-cloudcli] CloudCLI service, code $(printf %.7s "${RAILWAY_GIT_COMMIT_SHA:-unknown}")"
+echo "[paperclip-cloudcli] What changed: https://github.com/mikedepo/paperclip-cloudcli/blob/main/CHANGELOG.md"
 for v in GH_TOKEN REPO_URL CLAUDE_CODE_OAUTH_TOKEN TZ; do
   [ -n "${!v}" ] || unset "$v"
 done
