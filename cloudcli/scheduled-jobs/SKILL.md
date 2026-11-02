@@ -17,6 +17,8 @@ node ~/.claude/skills/scheduled-jobs/jobs.mjs pause|resume|archive "Daily report
 node ~/.claude/skills/scheduled-jobs/jobs.mjs run "Daily report"                              # run now
 node ~/.claude/skills/scheduled-jobs/jobs.mjs runs "Daily report" --limit 5
 node ~/.claude/skills/scheduled-jobs/jobs.mjs log "Daily report" [--run 2] [--full]          # task status, summary, tokens, cost, log
+node ~/.claude/skills/scheduled-jobs/jobs.mjs sync                                            # record jobs changed in Paperclip's dashboard
+node ~/.claude/skills/scheduled-jobs/jobs.mjs restore [--yes]                                 # recreate recorded jobs Paperclip doesn't have
 ```
 
 A job is named by its title (any case) or the start of its ID.
@@ -24,6 +26,8 @@ A job is named by its title (any case) or the start of its ID.
 ## Conventions
 
 - **A job belongs to one repo, the repo of this chat.** Each connected repo (listed in `~/.claude/CLAUDE.md`) has its own project in Paperclip, and the Runner runs a job on Paperclip's own checkout of the job's repo. Write the skill in the repo this chat is in and run the script from there: `create` reads the current folder's git remote. `--repo <name or owner/name>` names another connected repo. When the folder isn't in a connected repo, the script stops and lists the connected ones: ask the user which repo the job is for (or to add theirs on CloudCLI's `/setup` page, step 3), then pass `--repo`.
+- **Every job is recorded in its repo.** `create`, `update`, `pause`, `resume` and `archive` write the job (title, prompt, schedule, time zone, status) into the repo's `.claude/jobs.json`, then commit and push that file alone: git keeps every job and the history of its changes, and the jobs can be rebuilt from it on a new server. Pass on the script's "Recorded in" line; when it says not committed or not pushed, fix that (usually a pull) and push. Change jobs with the script, not by editing the file.
+- **When `list` reports a record and Paperclip disagree:** jobs only in a record (a new server, or a repo used on another one) → tell the user, run `restore` to show what it would recreate, and `restore --yes` once they agree. Jobs "not recorded as they are now" (changed in Paperclip's dashboard, or made before the record existed) → run `sync`.
 - **One job, one skill.** The prompt is "Run the `<name>` skill." plus at most one line of arguments. Write or fix the skill in the repo, then commit and push it before the job runs: the Runner pulls first and runs what is pushed.
 - **A job closes its own task in the same run.** The Runner's instructions say so; a skill written for a job should end with "mark the task done with a one-line summary, or blocked with the reason". A run that leaves its task open makes Paperclip start a second, costlier run just to close it.
 - **No overlap, no backlog.** The script creates jobs with `skip_if_active` (a run that fires while the last one is still working is skipped) and `skip_missed` (runs missed while the server was down are dropped).

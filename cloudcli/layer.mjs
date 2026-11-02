@@ -309,8 +309,10 @@ export function writeLayer() {
     lines.push(`- The user's ${picked.length > 1 ? 'repos are' : 'repo is'} cloned here, each with its own project in Paperclip, where its jobs run on Paperclip's own checkout of it:`);
     for (const repo of picked) {
       const memory = fs.existsSync(path.join(repo.dir, '.claude', 'memory'));
-      lines.push(`  - \`${repo.dir}\` (from ${repo.url})${memory ? "; Claude's shared memory is its `.claude/memory/`, committed with the repo" : ''}.`);
+      const recorded = readJson(path.join(repo.dir, '.claude', 'jobs.json'), {}).jobs?.length || 0;
+      lines.push(`  - \`${repo.dir}\` (from ${repo.url})${memory ? "; Claude's shared memory is its `.claude/memory/`, committed with the repo" : ''}${recorded ? `; its \`.claude/jobs.json\` records ${recorded} job${recorded > 1 ? 's' : ''}` : ''}.`);
     }
+    lines.push("- Each repo's `.claude/jobs.json` records its jobs (title, prompt, schedule, status); the scheduled-jobs script commits and pushes it at every change. Paperclip runs the jobs and git keeps them: on a new server, the script's `restore` recreates them. When a repo records jobs that the script's `list` doesn't show, tell the user and offer to restore them.");
     lines.push(`- A job belongs to the repo of the current chat: write its skill in that repo, and the scheduled-jobs script puts the job in that repo's project (it reads the current folder's git remote; \`--repo\` names another). When the chat isn't in one of these repos, or it's unclear which repo a job is for, ask the user. More repos can be added any time on step 3 of ${setupPage}.`);
   } else {
     lines.push(`- No repo is picked yet, and jobs need one: each job runs a skill from it, pulled before every run. Send the user to step 3 of ${setupPage} rather than wiring one yourself: it clones the repo here, connects it to Paperclip's project and wires the shared memory.`);

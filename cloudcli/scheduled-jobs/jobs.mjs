@@ -15,10 +15,14 @@ const USAGE = `node jobs.mjs <command> [options]   (--json for raw output)
   run <job>                                 run it now
   runs <job> [--limit N]                    recent runs
   log <job> [--run N] [--full]              a run's task status, summary, tokens and cost, and its log (default: the latest run)
+  sync [--repo <name>]                      record every job in its repo's .claude/jobs.json (after changes made in Paperclip's dashboard)
+  restore [--repo <name>] [--yes]           recreate the jobs the repos' .claude/jobs.json list that Paperclip doesn't have (a new server); without --yes, only shows them
 <job> is a job's title (any case) or the start of its ID.
-A job runs on one repo: the one the current folder is in (its git remote), or the one --repo names.`;
+A job runs on one repo: the one the current folder is in (its git remote), or the one --repo names.
+Every change to a job is recorded in its repo's .claude/jobs.json, committed and pushed.`;
 
 const CONFIG = path.join(os.homedir(), '.config', 'scheduled-jobs', 'paperclip.json');
+const SETUP = path.join(os.homedir(), '.config', 'paperclip-cloudcli', 'setup.json');
 const argv = process.argv.slice(2);
 const opts = {};
 const pos = [];
@@ -26,7 +30,7 @@ for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a.startsWith('--')) {
     const k = a.slice(2);
-    if (['json', 'paused', 'full', 'help'].includes(k)) opts[k] = true;
+    if (['json', 'paused', 'full', 'help', 'yes'].includes(k)) opts[k] = true;
     else opts[k] = argv[++i];
   } else pos.push(a);
 }
@@ -102,15 +106,31 @@ async function projects(company, archived = false) {
   return arr(await api('GET', `/api/companies/${company.id}/projects${archived ? '?includeArchived=true' : ''}`)).filter((p) => archived || !p.archivedAt);
 }
 
+// A folder's remote addresses, origin first ([] when it isn't a git checkout).
+function remotes(dir) {
+  const r = spawnSync('git', ['-C', dir, 'config', '--local', '--get-regexp', '^remote\\..*\\.url$'], { encoding: 'utf8' });
+  return (r.stdout || '').trim().split('\n').filter(Boolean).map((l) => l.split(/\s+/))
+    .sort((a, b) => (b[0] === 'remote.origin.url') - (a[0] === 'remote.origin.url')).map((x) => x[1]);
+}
+
 // The repo the current folder is in: its top folder and remote addresses, origin first. null outside a git repo.
 function folderRepo() {
   const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' });
   if (top.status !== 0) return null;
   const dir = top.stdout.trim();
-  const r = spawnSync('git', ['-C', dir, 'config', '--local', '--get-regexp', '^remote\\..*\\.url$'], { encoding: 'utf8' });
-  const urls = (r.stdout || '').trim().split('\n').filter(Boolean).map((l) => l.split(/\s+/))
-    .sort((a, b) => (b[0] === 'remote.origin.url') - (a[0] === 'remote.origin.url')).map((x) => x[1]);
-  return { dir, urls };
+  return { dir, urls: remotes(dir) };
+}
+
+// The clone on this server of a project's repo: the current folder when it is that repo, else the folder /setup
+// cloned it into (~/<name>, or ~/<owner>-<name> when that was taken). null when there is none.
+function cloneOf(project) {
+  const url = project && projectRepos(project)[0]?.repoUrl;
+  if (!url) return null;
+  let added = [];
+  try { added = JSON.parse(fs.readFileSync(SETUP, 'utf8')).repos || []; } catch {}
+  const [owner, name] = repoOf(project).split('/');
+  const dirs = [folderRepo()?.dir, ...added.map((r) => r.dir), path.join(os.homedir(), name), path.join(os.homedir(), `${owner}-${name}`)];
+  return dirs.find((d) => d && remotes(d).some((u) => sameRepo(u, url))) || null;
 }
 
 // The project a job goes in: the one --repo names; else the project of the repo the current folder is in; else the
@@ -232,6 +252,112 @@ async function showLog(job) {
   out(res, lines.join('\n'));
 }
 
+// ---- the record: each repo's .claude/jobs.json lists its jobs, committed and pushed at every change ----
+
+// Paperclip runs the jobs; the record keeps what they are in git, in plain terms another scheduler can read, so they
+// survive this server and can be recreated on a new one (restore).
+const RECORD = '.claude/jobs.json';
+const ABOUT = "Scheduled jobs on this repo, kept by the scheduled-jobs skill (https://github.com/mikedepo/paperclip-cloudcli): every change to a job is a commit of this file. Each job runs its prompt with Claude Code in this repo, on its 5-field cron schedule in its time zone; paused jobs don't run. To recreate them on a new server: node ~/.claude/skills/scheduled-jobs/jobs.mjs restore";
+const git = (dir, ...a) => spawnSync('git', ['-C', dir, ...a], { encoding: 'utf8', timeout: 120000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+const gitError = (r) => String(r.stderr || r.stdout || r.error?.message || '').trim().split('\n').filter(Boolean).pop() || `exit ${r.status}`;
+const sameJob = (e, job) => (!!e.paperclipId && e.paperclipId === job.id) || String(e.title || '').toLowerCase() === job.title.toLowerCase();
+const describe = (e) => `"${e.title}" (${(e.schedules || (e.cron ? [e] : [])).map((s) => `${s.cron} ${s.timezone || ZONE}`).join('; ') || 'run by hand only'}, ${e.status || 'active'})`;
+
+function readRecord(dir) {
+  const file = path.join(dir, RECORD);
+  if (!fs.existsSync(file)) return { jobs: null };
+  try {
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!Array.isArray(data.jobs)) throw new Error('it has no "jobs" list');
+    return { jobs: data.jobs };
+  } catch (e) { return { error: `${path.join(dir, RECORD)} isn't readable (${e.message})` }; }
+}
+
+const agentNames = new Map();
+async function agentName(id) {
+  if (!id) return null;
+  if (id === ctx.agent.id) return ctx.agent.name;
+  if (!agentNames.has(id)) agentNames.set(id, (await api('GET', `/api/agents/${id}`, undefined, { allow404: true }))?.name || null);
+  return agentNames.get(id);
+}
+
+// A job as the record keeps it: title, prompt, schedule, status; the agent only when it isn't the Runner.
+async function entryOf(job) {
+  const s = schedules(job).map((t) => ({ cron: t.cronExpression, timezone: t.timezone }));
+  const e = { title: job.title, prompt: job.description || '' };
+  if (s.length > 1) e.schedules = s;
+  else Object.assign(e, s[0] || { cron: null });
+  e.status = job.status;
+  const agent = await agentName(job.assigneeAgentId);
+  if (agent && agent.toLowerCase() !== 'runner') e.agent = agent;
+  e.paperclipId = job.id;
+  return e;
+}
+
+// Puts a job's entry in place of its old one (same Paperclip ID, or its title before the change), or at the end.
+const put = (job, entry, oldTitle = job.title) => (jobs) => {
+  const i = jobs.findIndex((x) => sameJob(x, job) || sameJob(x, { id: job.id, title: oldTitle }));
+  return i < 0 ? [...jobs, entry] : jobs.map((x, k) => (k === i ? entry : x));
+};
+const drop = (job) => (jobs) => jobs.filter((x) => !sameJob(x, job));
+
+async function projectJobs(project, archived = false) {
+  const all = arr(await api('GET', `/api/companies/${company.id}/routines`)).filter((j) => j.projectId === project.id && (archived || j.status !== 'archived'));
+  return Promise.all(all.map((j) => api('GET', `/api/routines/${j.id}`)));
+}
+
+// Rewrites a repo's record with edit(jobs), then commits and pushes that file alone. A repo with no record yet starts
+// from every job its project has, so jobs from before the record are listed too. Returns a line for the user.
+async function saveRecord(project, message, edit) {
+  if (!project) return 'Not recorded: the job has no repo.';
+  const where = `${repoOf(project)}'s ${RECORD}`;
+  const dir = cloneOf(project);
+  if (!dir) return `Not recorded: ${repoOf(project)} has no clone on this server (add it on step 3 of ${SETUP_PAGE}).`;
+  git(dir, 'pull', '--ff-only', '--quiet'); // best effort: change the latest pushed record
+  const rec = readRecord(dir);
+  if (rec.error) return `Not recorded: ${rec.error}. Fix or delete the file, then run: sync`;
+  const jobs = await edit(rec.jobs || await Promise.all((await projectJobs(project)).map(entryOf)));
+  if (!rec.jobs && !jobs.length) return `No jobs in ${repoOf(project)}; nothing to record.`;
+  const file = path.join(dir, RECORD);
+  const text = JSON.stringify({ about: ABOUT, jobs }, null, 2) + '\n';
+  if (fs.existsSync(file) && fs.readFileSync(file, 'utf8') === text) return `Already recorded in ${where}.`;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, text);
+  let r = git(dir, 'add', '--force', RECORD);
+  if (r.status === 0) r = git(dir, 'commit', '--quiet', '-m', message, '--', RECORD);
+  if (r.status !== 0) return `Written to ${where}, not committed (${gitError(r)}): commit and push it.`;
+  let p = git(dir, 'push', '--quiet');
+  if (p.status !== 0) {
+    // Someone pushed meanwhile: put this commit on top and push again.
+    const rb = git(dir, 'pull', '--rebase', '--autostash', '--quiet');
+    if (rb.status === 0) p = git(dir, 'push', '--quiet');
+    else git(dir, 'rebase', '--abort');
+  }
+  const sha = git(dir, 'rev-parse', '--short', 'HEAD').stdout.trim();
+  const branch = git(dir, 'branch', '--show-current').stdout.trim();
+  const main = git(dir, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD').stdout.trim().replace(/^origin\//, '');
+  const off = branch && main && branch !== main ? `, on branch ${branch}: merge it into ${main} to keep the record there` : '';
+  return p.status === 0 ? `Recorded in ${where}: commit ${sha}, pushed${off}.` : `Recorded in ${where}: commit ${sha}, not pushed (${gitError(p)}): push it.`;
+}
+
+async function newJob(project, { title, prompt, schedules: list = [], status = 'active', agentId = ctx.agent.id }) {
+  const job = await api('POST', `/api/companies/${company.id}/routines`, {
+    title,
+    description: prompt,
+    assigneeAgentId: agentId,
+    projectId: project.id,
+    priority: 'medium',
+    status,
+    concurrencyPolicy: 'skip_if_active',
+    catchUpPolicy: 'skip_missed',
+  });
+  for (const s of list) await api('POST', `/api/routines/${job.id}/triggers`, { kind: 'schedule', cronExpression: s.cron, timezone: s.timezone || ZONE });
+  return api('GET', `/api/routines/${job.id}`);
+}
+
+const projectById = async (id) => (id ? (await projects(company, true)).find((p) => p.id === id) || null : null);
+const reposToCheck = async () => (opts.repo ? [await projectFor(company)] : (await projects(company)).filter((p) => projectRepos(p).length));
+
 const ctx = await context(cmd === 'create' && opts.agent ? opts.agent : 'Runner');
 const { company } = ctx;
 PREFIX = company.issuePrefix || '';
@@ -247,26 +373,33 @@ switch (cmd) {
       const next = schedules(j).map((t) => t.nextRunAt).filter(Boolean).sort()[0];
       rows.push(`${j.id.slice(0, 8)}  ${j.title}  [${j.status}]  repo: ${j.repo}  ${scheduleText(j)}  next: ${j.status === 'active' ? when(next) : '-'}  last: ${last ? `${when(last.triggeredAt || last.createdAt)} ${last.status}` : '-'}\n          ${String(j.description || '').split('\n')[0].slice(0, 160)}\n          ${link(`routines/${j.id}`)}`);
     }
-    out(full, rows.length ? rows.join('\n') : 'No jobs yet. Create one: create "<title>" --prompt "Run the <skill> skill." --cron "0 9 * * *" --tz <zone>');
+    // Where the repos' records and Paperclip disagree: a new server (jobs only in a record) or dashboard edits.
+    const notes = [];
+    for (const p of await projects(company)) {
+      const dir = cloneOf(p);
+      const rec = dir ? readRecord(dir) : { jobs: null };
+      if (rec.error) { notes.push(`${rec.error}.`); continue; }
+      const live = full.filter((j) => j.projectId === p.id && j.status !== 'archived');
+      const only = (rec.jobs || []).filter((e) => !live.some((j) => sameJob(e, j)));
+      const stale = [];
+      for (const j of live) {
+        const e = (rec.jobs || []).find((x) => sameJob(x, j));
+        if (!e || JSON.stringify(e) !== JSON.stringify(await entryOf(j))) stale.push(j.title);
+      }
+      if (only.length) notes.push(`${repoOf(p)}'s ${RECORD} lists jobs Paperclip doesn't have: ${only.map(describe).join('; ')}. Recreate them with: restore`);
+      if (dir && stale.length) notes.push(`Not recorded as they are now in ${repoOf(p)}'s ${RECORD}: ${stale.map((t) => `"${t}"`).join(', ')}. Record them with: sync`);
+    }
+    const text = rows.length ? rows.join('\n') : 'No jobs yet. Create one: create "<title>" --prompt "Run the <skill> skill." --cron "0 9 * * *" --tz <zone>';
+    out(full, [text, ...notes].join('\n'));
     break;
   }
   case 'create': {
     const title = args[0];
     if (!title || !opts.prompt) die('Usage: create "<title>" --prompt "Run the <skill> skill." [--cron "0 9 * * *"] [--tz Europe/Paris] [--paused]');
     const project = await projectFor(company);
-    const job = await api('POST', `/api/companies/${company.id}/routines`, {
-      title,
-      description: opts.prompt,
-      assigneeAgentId: ctx.agent.id,
-      projectId: project.id,
-      priority: 'medium',
-      status: opts.paused ? 'paused' : 'active',
-      concurrencyPolicy: 'skip_if_active',
-      catchUpPolicy: 'skip_missed',
-    });
-    if (opts.cron) await api('POST', `/api/routines/${job.id}/triggers`, { kind: 'schedule', cronExpression: opts.cron, timezone: opts.tz || ZONE });
-    const full = await api('GET', `/api/routines/${job.id}`);
-    out({ ...full, repo: repoOf(project) }, `Created job ${full.id.slice(0, 8)} "${full.title}" for ${ctx.agent.name} in project "${project.name}" (${projectRepos(project).length ? `repo ${repoOf(project)}` : 'no repo yet'}): ${scheduleText(full)}, ${full.status}. Test it: run "${full.title}". ${link(`routines/${full.id}`)}`);
+    const full = await newJob(project, { title, prompt: opts.prompt, schedules: opts.cron ? [{ cron: opts.cron, timezone: opts.tz }] : [], status: opts.paused ? 'paused' : 'active' });
+    const record = await saveRecord(project, `Job "${full.title}" created: ${scheduleText(full)}, ${full.status}`, put(full, await entryOf(full)));
+    out({ ...full, repo: repoOf(project), record }, `Created job ${full.id.slice(0, 8)} "${full.title}" for ${ctx.agent.name} in project "${project.name}" (${projectRepos(project).length ? `repo ${repoOf(project)}` : 'no repo yet'}): ${scheduleText(full)}, ${full.status}. Test it: run "${full.title}". ${link(`routines/${full.id}`)}\n${record}`);
     break;
   }
   case 'update': {
@@ -275,11 +408,25 @@ switch (cmd) {
     if (opts.title) patch.title = opts.title;
     if (opts.prompt) patch.description = opts.prompt;
     const moved = opts.repo ? await projectFor(company) : null;
+    if (moved?.id === job.projectId) die(`"${job.title}" is already on ${repoOf(moved)}.`);
     if (moved) patch.projectId = moved.id;
     if (Object.keys(patch).length) await api('PATCH', `/api/routines/${job.id}`, patch);
     if (opts.cron || opts.tz) await setSchedule(job, opts.cron, opts.tz);
     const full = await api('GET', `/api/routines/${job.id}`);
-    out(full, `Updated "${full.title}": ${scheduleText(full)}, ${full.status}${moved ? `, repo ${repoOf(moved)}` : ''}`);
+    const changes = [
+      opts.title && full.title !== job.title ? `renamed from "${job.title}"` : '',
+      opts.prompt ? 'new prompt' : '',
+      opts.cron || opts.tz ? `schedule ${scheduleText(full)}` : '',
+    ].filter(Boolean).join(', ');
+    const records = [];
+    if (moved) {
+      const from = await projectById(job.projectId);
+      if (from) records.push(await saveRecord(from, `Job "${job.title}" moved to ${repoOf(moved)}`, drop(job)));
+      records.push(await saveRecord(moved, `Job "${full.title}" moved here from ${from ? repoOf(from) : 'no repo'}${changes ? `: ${changes}` : ''}`, put(full, await entryOf(full), job.title)));
+    } else {
+      records.push(await saveRecord(await projectById(full.projectId), `Job "${full.title}" changed: ${changes || 'recorded again'}`, put(full, await entryOf(full), job.title)));
+    }
+    out({ ...full, record: records }, `Updated "${full.title}": ${scheduleText(full)}, ${full.status}${moved ? `, repo ${repoOf(moved)}` : ''}\n${records.join('\n')}`);
     break;
   }
   case 'pause':
@@ -287,8 +434,64 @@ switch (cmd) {
   case 'archive': {
     const job = await findJob(company, args[0]);
     const status = { pause: 'paused', resume: 'active', archive: 'archived' }[cmd];
-    const r = await api('PATCH', `/api/routines/${job.id}`, { status });
-    out(r, `"${job.title}" is ${status}`);
+    await api('PATCH', `/api/routines/${job.id}`, { status });
+    const full = await api('GET', `/api/routines/${job.id}`);
+    const record = await saveRecord(await projectById(full.projectId), `Job "${full.title}" ${status}`, status === 'archived' ? drop(full) : put(full, await entryOf(full)));
+    out({ ...full, record }, `"${job.title}" is ${status}\n${record}`);
+    break;
+  }
+  case 'sync': {
+    const lines = [];
+    for (const p of await reposToCheck()) {
+      const all = await projectJobs(p, true);
+      const live = all.filter((j) => j.status !== 'archived');
+      const archived = all.filter((j) => j.status === 'archived');
+      const entries = await Promise.all(live.map(entryOf));
+      let only = [];
+      lines.push(await saveRecord(p, 'Jobs recorded as they are in Paperclip', (jobs) => {
+        // Archived jobs leave the record; jobs Paperclip doesn't have (a new server) stay, for restore.
+        let next = jobs.filter((x) => live.some((j) => sameJob(x, j)) || !archived.some((j) => sameJob(x, j)));
+        live.forEach((j, i) => { next = put(j, entries[i])(next); });
+        only = next.filter((x) => !live.some((j) => sameJob(x, j)));
+        return next;
+      }));
+      if (only.length) lines.push(`  Only in the record, not in Paperclip: ${only.map(describe).join('; ')}. Recreate with: restore --repo ${repoOf(p)}; or, if no longer wanted, remove ${only.length > 1 ? 'them' : 'it'} from the file and commit.`);
+    }
+    out(lines, lines.join('\n') || 'No repo is connected.');
+    break;
+  }
+  case 'restore': {
+    const lines = [];
+    const agents = arr(await api('GET', `/api/companies/${company.id}/agents`)).filter((a) => a.status !== 'terminated');
+    for (const p of await reposToCheck()) {
+      const dir = cloneOf(p);
+      if (!dir) { lines.push(`${repoOf(p)}: no clone on this server.`); continue; }
+      git(dir, 'pull', '--ff-only', '--quiet');
+      const rec = readRecord(dir);
+      if (rec.error) { lines.push(`${rec.error}.`); continue; }
+      if (!rec.jobs?.length) { lines.push(`${repoOf(p)}: no jobs recorded.`); continue; }
+      const all = await projectJobs(p, true);
+      const live = all.filter((j) => j.status !== 'archived');
+      const todo = [];
+      for (const e of rec.jobs.filter((x) => !live.some((j) => sameJob(x, j)))) {
+        const archived = all.find((j) => j.status === 'archived' && j.id === e.paperclipId);
+        const agent = e.agent ? agents.find((a) => a.name.toLowerCase() === String(e.agent).toLowerCase()) : ctx.agent;
+        if (archived) lines.push(`${repoOf(p)}: "${e.title}" was archived in Paperclip's dashboard; skipped. Run sync to drop it from the record.`);
+        else if (!e.title || !e.prompt) lines.push(`${repoOf(p)}: an entry without a title or prompt; skipped.`);
+        else if (!agent) lines.push(`${repoOf(p)}: "${e.title}" is for the agent "${e.agent}", which Paperclip doesn't have; skipped.`);
+        else todo.push({ e, agent });
+      }
+      if (!todo.length) { lines.push(`${repoOf(p)}: nothing to recreate (${rec.jobs.length} recorded).`); continue; }
+      if (!opts.yes) { lines.push(`${repoOf(p)}: would recreate ${todo.map(({ e }) => describe(e)).join('; ')}. Run again with --yes to do it.`); continue; }
+      const made = [];
+      for (const { e, agent } of todo) {
+        made.push(await newJob(p, { title: e.title, prompt: e.prompt, schedules: e.schedules || (e.cron ? [e] : []), status: e.status === 'paused' ? 'paused' : 'active', agentId: agent.id }));
+      }
+      const entries = await Promise.all(made.map(entryOf));
+      lines.push(`${repoOf(p)}: recreated ${made.map((j) => `"${j.title}" (${scheduleText(j)}, ${j.status})`).join('; ')}.`);
+      lines.push(await saveRecord(p, `Jobs recreated in Paperclip: ${made.map((j) => `"${j.title}"`).join(', ')}`, (jobs) => made.reduce((next, j, i) => put(j, entries[i])(next), jobs)));
+    }
+    out(lines, lines.join('\n') || 'No repo is connected.');
     break;
   }
   case 'run': {
