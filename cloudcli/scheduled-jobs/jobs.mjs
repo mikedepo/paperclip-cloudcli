@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// The scheduled-jobs skill's script: this server's jobs, which are Paperclip routines run by the "Runner" agent.
+// The scheduled-jobs skill's script: this server's jobs, which are Paperclip routines run by the "Runner" agent
+// (Claude), or by the optional "Codex" agent for the jobs given to it.
 // Talks to Paperclip's REST API over Railway's private network with the board API key the template stored in
 // ~/.config/scheduled-jobs/paperclip.json. Part of AvgSoft's Paperclip + CloudCLI template; rewritten at every start.
 import { spawnSync } from 'node:child_process';
@@ -10,7 +11,7 @@ import path from 'node:path';
 const USAGE = `node jobs.mjs <command> [options]   (--json for raw output)
   list                                      every job: status, repo, schedule, next and last run
   create "<title>" --prompt "<prompt>" [--cron "<min hour dom mon dow>"] [--tz <IANA zone, default: the server's TZ>] [--paused] [--agent <name>] [--repo <name or owner/name>] [--secrets "NAME,NAME"]
-  update <job> [--title ...] [--prompt ...] [--cron ...] [--tz ...] [--repo ...] [--secrets ...]   (--secrets "" clears them)
+  update <job> [--title ...] [--prompt ...] [--cron ...] [--tz ...] [--repo ...] [--agent ...] [--secrets ...]   (--secrets "" clears them)
   pause <job> | resume <job> | archive <job>
   run <job>                                 run it now
   runs <job> [--limit N]                    recent runs
@@ -19,7 +20,8 @@ const USAGE = `node jobs.mjs <command> [options]   (--json for raw output)
   restore [--repo <name>] [--yes]           recreate the jobs the repos' .claude/jobs.json list that Paperclip doesn't have (a new server); without --yes, only shows them
 <job> is a job's title (any case) or the start of its ID.
 A job runs on one repo: the one the current folder is in (its git remote), or the one --repo names.
-Every change to a job is recorded in its repo's .claude/jobs.json, committed and pushed.`;
+Every change to a job is recorded in its repo's .claude/jobs.json, committed and pushed.
+--agent: Runner (Claude, the default) or Codex (OpenAI's Codex, once connected on /setup).`;
 
 const CONFIG = path.join(os.homedir(), '.config', 'scheduled-jobs', 'paperclip.json');
 const SETUP = path.join(os.homedir(), '.config', 'paperclip-cloudcli', 'setup.json');
@@ -77,8 +79,11 @@ async function context(agentName = 'Runner') {
     const agent = agents.find((a) => a.name.toLowerCase() === agentName.toLowerCase() && a.status !== 'terminated');
     if (agent) return { company, agent };
   }
-  die(`No agent named "${agentName}" in Paperclip.`);
+  die(noAgent(agentName));
 }
+const noAgent = (name) => (/^codex$/i.test(String(name))
+  ? `No "Codex" agent in Paperclip yet: the user connects Codex (their ChatGPT account) in the "Optional: Codex" card of ${SETUP_PAGE} (same login), which creates it. Then run this again.`
+  : `No agent named "${name}" in Paperclip (the template's are "Runner", and "Codex" once connected on ${SETUP_PAGE}).`);
 
 // ---- repos: each connected repo has its own Paperclip project, whose primary workspace it is ----
 
@@ -202,6 +207,13 @@ function logText(content) {
       try {
         const e = JSON.parse(l);
         if (e.type === 'result') shown = `[result] ${e.result ?? e.subtype}`;
+        // Codex's `codex exec --json` events: its messages, and the commands it ran.
+        else if (e.item && typeof e.item === 'object') {
+          const it = e.item;
+          shown = ['agent_message', 'reasoning'].includes(it.type) ? String(it.text || `[${it.type}]`)
+            : it.type === 'command_execution' ? `[command] ${it.command}${it.exit_code != null ? ` (exit ${it.exit_code})` : ''}`
+            : `[${it.type || e.type}]`;
+        }
         else if (e.type === 'assistant') shown = arr(e.message?.content).filter((c) => c.type === 'text').map((c) => c.text).join(' ') || `[${arr(e.message?.content).map((c) => c.type === 'tool_use' ? `tool ${c.name}` : c.type).join(', ')}]`;
         else if (e.type) shown = `[${e.type}${e.subtype ? ' ' + e.subtype : ''}]`;
       } catch {}
@@ -246,7 +258,9 @@ async function showLog(job) {
   }
   const agent = job.assigneeAgentId ? await api('GET', `/api/agents/${job.assigneeAgentId}`, undefined, { allow404: true }) : null;
   if (agent && (agent.status === 'paused' || agent.lifecycleError)) {
-    lines.push(`Agent ${agent.name} is ${agent.status}${agent.lifecycleError ? ` (${agent.lifecycleError})` : ''}: its runs wait. A new Claude agent stays paused until Paperclip's check of its Claude sign-in passes; the fix: connect Claude on ${SETUP_PAGE} (same login), which gives Paperclip the token and retries the agent (or sign in to Claude on the agent's configuration page in Paperclip and press Retry).`);
+    lines.push(`Agent ${agent.name} is ${agent.status}${agent.lifecycleError ? ` (${agent.lifecycleError})` : ''}: its runs wait. ${agent.adapterType === 'codex_local'
+      ? `The Codex agent waits until Paperclip's check of its ChatGPT sign-in passes; the fix: connect Codex again in the "Optional: Codex" card of ${SETUP_PAGE} (same login), which signs it in and retries the agent.`
+      : `A new Claude agent stays paused until Paperclip's check of its Claude sign-in passes; the fix: connect Claude on ${SETUP_PAGE} (same login), which gives Paperclip the token and retries the agent (or sign in to Claude on the agent's configuration page in Paperclip and press Retry).`}`);
   }
   if (cfg.publicUrl) lines.push(`Job: ${link(`routines/${job.id}`)}`);
   out(res, lines.join('\n'));
@@ -257,7 +271,7 @@ async function showLog(job) {
 // Paperclip runs the jobs; the record keeps what they are in git, in plain terms another scheduler can read, so they
 // survive this server and can be recreated on a new one (restore).
 const RECORD = '.claude/jobs.json';
-const ABOUT = "Scheduled jobs on this repo, kept by the scheduled-jobs skill (https://github.com/mikedepo/paperclip-cloudcli): every change to a job is a commit of this file. Each job runs its prompt with Claude Code in this repo, on its 5-field cron schedule in its time zone; paused jobs don't run. To recreate them on a new server: node ~/.claude/skills/scheduled-jobs/jobs.mjs restore";
+const ABOUT = "Scheduled jobs on this repo, kept by the scheduled-jobs skill (https://github.com/mikedepo/paperclip-cloudcli): every change to a job is a commit of this file. Each job runs its prompt in this repo with Claude Code (the Runner agent), or with the agent its \"agent\" names (Codex: OpenAI's Codex), on its 5-field cron schedule in its time zone; paused jobs don't run. To recreate them on a new server: node ~/.claude/skills/scheduled-jobs/jobs.mjs restore";
 const git = (dir, ...a) => spawnSync('git', ['-C', dir, ...a], { encoding: 'utf8', timeout: 120000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
 const gitError = (r) => String(r.stderr || r.stdout || r.error?.message || '').trim().split('\n').filter(Boolean).pop() || `exit ${r.status}`;
 const sameJob = (e, job) => (!!e.paperclipId && e.paperclipId === job.id) || String(e.title || '').toLowerCase() === job.title.toLowerCase();
@@ -437,12 +451,18 @@ switch (cmd) {
     const moved = opts.repo ? await projectFor(company) : null;
     if (moved?.id === job.projectId) die(`"${job.title}" is already on ${repoOf(moved)}.`);
     if (moved) patch.projectId = moved.id;
+    // --agent hands the job to another agent (Runner or Codex); the record keeps which.
+    const handed = opts.agent ? arr(await api('GET', `/api/companies/${company.id}/agents`))
+      .find((a) => a.name.toLowerCase() === String(opts.agent).toLowerCase() && a.status !== 'terminated') : null;
+    if (opts.agent && !handed) die(noAgent(opts.agent));
+    if (handed && handed.id !== job.assigneeAgentId) patch.assigneeAgentId = handed.id;
     if (Object.keys(patch).length) await api('PATCH', `/api/routines/${job.id}`, patch);
     if (opts.cron || opts.tz) await setSchedule(job, opts.cron, opts.tz);
     const full = await api('GET', `/api/routines/${job.id}`);
     const changes = [
       opts.title && full.title !== job.title ? `renamed from "${job.title}"` : '',
       opts.prompt ? 'new prompt' : '',
+      patch.assigneeAgentId ? `run by ${handed.name}` : '',
       opts.cron || opts.tz ? `schedule ${scheduleText(full)}` : '',
       SECRETS ? (SECRETS.length ? `needs ${SECRETS.join(', ')}` : 'needs no secrets') : '',
     ].filter(Boolean).join(', ');
@@ -456,7 +476,7 @@ switch (cmd) {
       records.push(await saveRecord(await projectById(full.projectId), `Job "${full.title}" changed: ${changes || 'recorded again'}`, put(full, await entryOf(full), { oldTitle: job.title, secrets: SECRETS })));
     }
     const lacking = await missingSecrets(full, SECRETS);
-    out({ ...full, record: records }, `Updated "${full.title}": ${scheduleText(full)}, ${full.status}${moved ? `, repo ${repoOf(moved)}` : ''}\n${records.join('\n')}${lacking ? `\n${lacking}` : ''}`);
+    out({ ...full, record: records }, `Updated "${full.title}": ${scheduleText(full)}, ${full.status}${moved ? `, repo ${repoOf(moved)}` : ''}${handed ? `, run by ${handed.name}` : ''}\n${records.join('\n')}${lacking ? `\n${lacking}` : ''}`);
     break;
   }
   case 'pause':
@@ -508,7 +528,7 @@ switch (cmd) {
         const agent = e.agent ? agents.find((a) => a.name.toLowerCase() === String(e.agent).toLowerCase()) : ctx.agent;
         if (archived) lines.push(`${repoOf(p)}: "${e.title}" was archived in Paperclip's dashboard; skipped. Run sync to drop it from the record.`);
         else if (!e.title || !e.prompt) lines.push(`${repoOf(p)}: an entry without a title or prompt; skipped.`);
-        else if (!agent) lines.push(`${repoOf(p)}: "${e.title}" is for the agent "${e.agent}", which Paperclip doesn't have; skipped.`);
+        else if (!agent) lines.push(`${repoOf(p)}: "${e.title}" is for the agent "${e.agent}", which Paperclip doesn't have; skipped.${/^codex$/i.test(String(e.agent)) ? ` Connect Codex in the "Optional: Codex" card of ${SETUP_PAGE}, then restore again.` : ''}`);
         else todo.push({ e, agent });
       }
       if (!todo.length) { lines.push(`${repoOf(p)}: nothing to recreate (${rec.jobs.length} recorded).`); continue; }

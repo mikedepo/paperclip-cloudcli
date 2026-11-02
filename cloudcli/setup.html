@@ -108,13 +108,32 @@
       <p class="err" id="tzErr"></p>
     </section>
 
+    <section class="card" id="codexCard">
+      <h2>Optional: Codex <span class="pill" id="codexPill">not connected</span></h2>
+      <p>Jobs run with Claude. To run some with OpenAI's Codex instead, on your ChatGPT plan, connect it here: Paperclip signs Codex in on your server with a one-time code and adds a "Codex" agent. Then ask Claude to run a job with Codex.</p>
+      <p class="small">ChatGPT asks for device code sign-in to be turned on first, in its Security settings.</p>
+      <div class="row"><button id="codexStart">Start</button></div>
+      <div id="codexCodeBox" class="hidden">
+        <p>Open <a id="codexUrl" target="_blank" rel="noopener" href="https://auth.openai.com/codex/device">auth.openai.com/codex/device</a>, sign in to ChatGPT and enter this code:</p>
+        <p class="code" id="codexCode"></p>
+        <p class="small">This page updates once ChatGPT confirms.</p>
+      </div>
+      <p class="err" id="codexErr"></p>
+      <p class="small" id="codexHereLine">Codex in CloudCLI's chats and terminal signs in separately, with its own code. <button class="ghost small" id="codexHereStart">Sign in Codex in CloudCLI</button></p>
+      <div id="codexHereBox" class="hidden">
+        <p>Open <a id="codexHereUrl" target="_blank" rel="noopener" href="https://auth.openai.com/codex/device">auth.openai.com/codex/device</a> and enter this code:</p>
+        <p class="code" id="codexHereCode"></p>
+      </div>
+      <p class="err" id="codexHereErr"></p>
+    </section>
+
     <section class="card" id="doneCard">
       <h2>What next</h2>
       <p>Tell Claude in CloudCLI what should be done and when, in plain words. Claude writes the job's instructions into your repo, schedules it in Paperclip and runs it once to check. Paperclip then runs it on time; every run's status, transcript and usage are on its dashboard, with the same login.</p>
       <p>Try one of these in a new CloudCLI session (click to copy), or just say hi and Claude explains what it can do:</p>
       <p class="example" title="Click to copy">Every weekday at 8:00, list the open issues in my repo with a one-line summary each.</p>
       <p class="example" title="Click to copy">Every Monday at 9:00, summarize last week's commits in my repo.</p>
-      <p class="small">Claude must be connected (step 1) for the jobs to run.</p>
+      <p class="small">Claude must be connected (step 1) for the jobs to run, or Codex for the jobs given to it.</p>
       <div class="row"><button id="finish">Finish and open CloudCLI</button><a id="pcLink" class="btnlink hidden" target="_blank" rel="noopener">Open Paperclip</a></div>
       <p class="err" id="finishErr"></p>
     </section>
@@ -161,6 +180,16 @@ function render(s) {
     if (r) p.title = r.dir;
     pills.appendChild(p);
   }
+  const cx = s.codex;
+  pill('codexPill', cx.done ? 'connected' : cx.status === 'saving' ? 'saving' : 'not connected', cx.done);
+  $('codexCodeBox').classList.toggle('hidden', !cx.code);
+  if (cx.code) { $('codexCode').textContent = cx.code; if (cx.url) $('codexUrl').href = cx.url; }
+  $('codexErr').textContent = cx.status === 'error' ? (cx.error || '') : '';
+  $('codexStart').textContent = cx.done ? 'Redo' : 'Start';
+  $('codexHereStart').textContent = cx.here.done ? 'Sign in again' : 'Sign in Codex in CloudCLI';
+  $('codexHereBox').classList.toggle('hidden', !cx.here.code);
+  if (cx.here.code) { $('codexHereCode').textContent = cx.here.code; if (cx.here.url) $('codexHereUrl').href = cx.here.url; }
+  $('codexHereErr').textContent = cx.here.status === 'error' ? (cx.here.error || '') : '';
   pill('tzPill', s.timezone.value, s.timezone.chosen);
   if (!$('tzInput').value) $('tzInput').value = s.timezone.chosen ? s.timezone.value : (Intl.DateTimeFormat().resolvedOptions().timeZone || s.timezone.value);
   if (s.links.paperclip) { $('pcLink').href = s.links.paperclip; $('pcLink').classList.remove('hidden'); }
@@ -168,7 +197,8 @@ function render(s) {
   const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   if (!s.timezone.chosen && browserZone && !zoneSaved) { zoneSaved = true; call('timezone', { timezone: browserZone }).then(render).catch(() => {}); }
   if (s.github.done && !s.repos.length && !reposListed) { reposListed = true; $('repoLoad').click(); }
-  const busy = ['starting', 'waiting-code', 'checking', 'saving'].includes(s.claude.status) || ['starting', 'waiting-user'].includes(s.github.status);
+  const busy = ['starting', 'waiting-code', 'checking', 'saving'].includes(s.claude.status) || ['starting', 'waiting-user'].includes(s.github.status)
+    || ['starting', 'waiting-user', 'saving'].includes(cx.status) || ['starting', 'waiting-user'].includes(cx.here.status);
   if (busy && !polling) polling = setInterval(refresh, 3000);
   if (!busy && polling) { clearInterval(polling); polling = null; }
 }
@@ -210,6 +240,8 @@ act('repoUse', 'repoErr', async () => {
   render(r.state);
 }, 'Cloning…');
 act('tzSave', 'tzErr', async () => render(await call('timezone', { timezone: $('tzInput').value.trim() })));
+act('codexStart', 'codexErr', async () => render(await call('codex/start', {})), 'Asking Paperclip for a code…');
+act('codexHereStart', 'codexHereErr', async () => render(await call('codex/here', {})), 'Starting Codex…');
 let finishWarned = false;
 act('finish', 'finishErr', async () => {
   const s = await call('state');

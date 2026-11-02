@@ -1,6 +1,6 @@
 ---
 name: scheduled-jobs
-description: List, create, change, pause, run and check this server's scheduled jobs (Paperclip routines run by the Runner agent), and read what a run did and cost. Use whenever the user wants something to run on a schedule or now, asks when jobs run, why a job failed or what it cost, even if they don't say "job".
+description: List, create, change, pause, run and check this server's scheduled jobs (Paperclip routines run by the Runner agent with Claude, or by the Codex agent when the user chose Codex), and read what a run did and cost. Use whenever the user wants something to run on a schedule or now, asks when jobs run, why a job failed or what it cost, even if they don't say "job".
 ---
 
 # Scheduled jobs
@@ -12,7 +12,7 @@ Script (prints text; `--json` for the raw API objects):
 ```
 node ~/.claude/skills/scheduled-jobs/jobs.mjs list                                            # each job's repo too
 node ~/.claude/skills/scheduled-jobs/jobs.mjs create "Daily report" --prompt "Run the daily-report skill." --cron "0 9 * * 1-5"   # server zone; --tz to override; --repo <name>
-node ~/.claude/skills/scheduled-jobs/jobs.mjs update "Daily report" --cron "30 8 * * 1-5"      # also --title, --prompt, --tz, --repo (moves it)
+node ~/.claude/skills/scheduled-jobs/jobs.mjs update "Daily report" --cron "30 8 * * 1-5"      # also --title, --prompt, --tz, --repo (moves it), --agent
 node ~/.claude/skills/scheduled-jobs/jobs.mjs pause|resume|archive "Daily report"
 node ~/.claude/skills/scheduled-jobs/jobs.mjs run "Daily report"                              # run now
 node ~/.claude/skills/scheduled-jobs/jobs.mjs runs "Daily report" --limit 5
@@ -29,6 +29,7 @@ A job is named by its title (any case) or the start of its ID.
 - **Every job is recorded in its repo.** `create`, `update`, `pause`, `resume` and `archive` write the job (title, prompt, schedule, time zone, status, the names of the secrets it needs) into the repo's `.claude/jobs.json`, then commit and push that file alone: git keeps every job and the history of its changes, and the jobs can be rebuilt from it on a new server. Pass on the script's "Recorded in" line; when it says not committed or not pushed, fix that (usually a pull) and push. Change jobs with the script, not by editing the file.
 - **Keep the record matching Paperclip, without being asked.** Run `list` before changing jobs, and whenever the user says they changed a job in Paperclip's dashboard. Jobs "not recorded as they are now" (a dashboard change, or made before the record existed) → run `sync` right away and say so. Jobs only in a record (a new server, or a repo used on another one) → tell the user, run `restore` to show what it would recreate, and `restore --yes` once they agree.
 - **Secrets a job needs:** when its skill uses a key or variable (an API key, a webhook address), pass the names with `--secrets "NAME,NAME"` on `create` (or `update`; `--secrets ""` clears them). The record keeps the names, never the values, so a new server knows what to set up, and the script says when the job's agent doesn't have one. The user adds the value on that agent's **Secrets & variables** page in Paperclip: never ask for it in the chat, and never write one into the repo.
+- **Which agent runs a job: the Runner (Claude) unless the user asks for Codex.** When the user wants a job run with OpenAI's Codex (or "ChatGPT", "GPT", "OpenAI"), pass `--agent Codex` on `create`, or move an existing job with `update <job> --agent Codex` (`--agent Runner` moves it back). Codex needs the user's ChatGPT account connected in the "Optional: Codex" card of CloudCLI's `/setup` page; without it the script stops and says so: send the user there, never ask for an OpenAI key in the chat. Codex reads the same skill, `.claude/skills/<name>/SKILL.md` in the repo, so write it as plain steps either agent can follow. The record keeps the agent (`"agent": "Codex"`). Then test with `run` as usual; `log` shows Codex's messages and commands, and its usage counts against the user's ChatGPT plan.
 - **One job, one skill.** The prompt is "Run the `<name>` skill." plus at most one line of arguments. Write or fix the skill in the repo, then commit and push it before the job runs: the Runner pulls first and runs what is pushed.
 - **A job closes its own task in the same run.** The Runner's instructions say so; a skill written for a job should end with "mark the task done with a one-line summary, or blocked with the reason". A run that leaves its task open makes Paperclip start a second, costlier run just to close it.
 - **No overlap, no backlog.** The script creates jobs with `skip_if_active` (a run that fires while the last one is still working is skipped) and `skip_missed` (runs missed while the server was down are dropped).
@@ -36,4 +37,4 @@ A job is named by its title (any case) or the start of its ID.
 - **Cost:** `log` shows each agent run's tokens and cost. Runs on a Claude subscription show no API cost; look at tokens.
 - **Schedules** are 5-field cron in the job's time zone. New jobs use the server's zone (`TZ` on the deploy form, in `~/.claude/CLAUDE.md`; the script shows times in it) unless the user names another; pass it with `--tz` (an IANA name such as `America/Toronto`).
 - **Give the user links:** the script prints each job's, task's and run's page in Paperclip's dashboard (same login as CloudCLI), where people see every job, its next run and each run's transcript.
-- Don't create agents, companies or projects, and don't change the Runner's instructions: the template manages them and rewrites them at every start. Repos are added on the `/setup` page, which gives each its project.
+- Don't create agents, companies or projects, and don't change the Runner's or Codex's instructions: the template manages them and rewrites them at every start. Repos are added on the `/setup` page, which gives each its project.

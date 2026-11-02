@@ -49,7 +49,7 @@ export async function pc(method, p, body) {
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch {}
-  if (!res.ok) throw new Error(`Paperclip ${method} ${p.split('?')[0]}: ${res.status}`);
+  if (!res.ok) throw new Error(`Paperclip ${method} ${p.split('?')[0]}: ${res.status}${typeof json?.error === 'string' ? ` (${json.error.slice(0, 200)})` : ''}`);
   return json;
 }
 export const arr = (j) => (Array.isArray(j) ? j : j?.items || j?.data || []);
@@ -73,24 +73,100 @@ export async function upsertSecret(company, name, value) {
 // Paperclip uses the GITHUB_TOKEN company secret for its own checkouts, not inside runs (where, with no GitHub
 // connection set up in Paperclip, git and gh would look for a GitHub login of Paperclip's own that doesn't exist).
 export const RUNNER_SECRETS = { CLAUDE_CODE_OAUTH_TOKEN: 'CLAUDE_CODE_OAUTH_TOKEN', GH_TOKEN: 'GITHUB_TOKEN', GITHUB_TOKEN: 'GITHUB_TOKEN' };
+// The Codex agent's: GitHub only. Its ChatGPT sign-in is Paperclip's own AI connection, bound in its runtimeConfig.
+export const CODEX_SECRETS = { GH_TOKEN: 'GITHUB_TOKEN', GITHUB_TOKEN: 'GITHUB_TOKEN' };
 
-// Binds every RUNNER_SECRETS secret that exists. Paperclip's PATCH replaces the whole env block, so it is read and
-// written back whole (Paperclip restores any value it shows redacted). Returns the names newly bound.
-export async function bindRunnerSecrets() {
-  const { company, runner } = await runnerContext();
-  const secrets = arr(await pc('GET', `/api/companies/${company.id}/secrets`));
-  const agent = await pc('GET', `/api/agents/${runner.id}`);
-  const env = { ...(agent?.adapterConfig?.env || {}) };
+// The env block with every `map` secret that exists bound as a secret_ref; `bound` lists the names newly bound.
+function secretEnv(secrets, map, current = {}) {
+  const env = { ...current };
   const bound = [];
-  for (const [key, name] of Object.entries(RUNNER_SECRETS)) {
+  for (const [key, name] of Object.entries(map)) {
     const secret = secrets.find((s) => s.name === name);
     if (!secret || (env[key]?.type === 'secret_ref' && env[key].secretId === secret.id)) continue;
     env[key] = { type: 'secret_ref', secretId: secret.id, version: 'latest' };
     bound.push(key);
   }
-  if (bound.length) await pc('PATCH', `/api/agents/${runner.id}`, { adapterConfig: { env } });
-  return { runner, bound };
+  return { env, bound };
 }
+
+// Binds every RUNNER_SECRETS secret that exists on the Runner, and every CODEX_SECRETS one on the Codex agent when
+// there is one. Paperclip's PATCH replaces the whole env block, so it is read and written back whole (Paperclip
+// restores any value it shows redacted). Returns the names newly bound.
+export async function bindRunnerSecrets() {
+  const { company, runner } = await runnerContext();
+  const secrets = arr(await pc('GET', `/api/companies/${company.id}/secrets`));
+  const agent = await pc('GET', `/api/agents/${runner.id}`);
+  const { env, bound } = secretEnv(secrets, RUNNER_SECRETS, agent?.adapterConfig?.env || {});
+  if (bound.length) await pc('PATCH', `/api/agents/${runner.id}`, { adapterConfig: { env } });
+  const codex = await codexAgent(company);
+  let codexBound = [];
+  if (codex) {
+    const full = await pc('GET', `/api/agents/${codex.id}`);
+    const c = secretEnv(secrets, CODEX_SECRETS, full?.adapterConfig?.env || {});
+    if (c.bound.length) await pc('PATCH', `/api/agents/${codex.id}`, { adapterConfig: { env: c.env } });
+    codexBound = c.bound;
+  }
+  return { runner, bound, codex, codexBound };
+}
+
+// ---------- Codex (optional): jobs run with the user's ChatGPT account ----------
+// The sign-in is Paperclip's own (its local AI sign-in: `codex login --device-auth` on Paperclip's server, the
+// credential kept encrypted as Paperclip's AI connection and refreshed by Paperclip); this page only relays the
+// one-time code. The "Codex" agent is created here once signed in, bound to that connection, so Paperclip's check of
+// it passes at once; Paperclip's own wiring keeps it at every start (codex.md, its working folder).
+export const CODEX_AGENT = 'Codex';
+export const CODEX_CONNECTION = 'ChatGPT (Codex jobs)';
+const CODEX_MD = new URL('./codex.md', import.meta.url); // published from paperclip/codex.md, as on Paperclip
+
+export async function codexAgent(company) {
+  return arr(await pc('GET', `/api/companies/${company.id}/agents`))
+    .find((a) => a.name === CODEX_AGENT && a.adapterType === 'codex_local' && a.status !== 'terminated') || null;
+}
+
+// What Paperclip's sign-in is for: a company-shared ChatGPT connection, the same one again on a redo.
+export async function codexIntent(company) {
+  const known = arr((await pc('GET', `/api/companies/${company.id}/ai-connections`))?.connections)
+    .find((c) => c.provider === 'openai' && c.method === 'subscription' && c.ownership === 'shared' && c.name === CODEX_CONNECTION);
+  return {
+    provider: 'openai', method: 'subscription', name: CODEX_CONNECTION, ownership: 'shared', agentIds: [], allAgents: true,
+    ...(known ? { connectionId: known.id } : {}),
+  };
+}
+
+// Creates the Codex agent on the saved connection, or binds the existing one to it and retries Paperclip's check.
+export async function connectCodexAgent({ connectionId, grantId }) {
+  const { company, runner } = await runnerContext();
+  const binding = { provider: 'openai', method: 'subscription', mode: 'shared', connectionId, grantId };
+  const existing = await codexAgent(company);
+  if (!existing) {
+    const r = await pc('GET', `/api/agents/${runner.id}`);
+    const { env } = secretEnv(arr(await pc('GET', `/api/companies/${company.id}/secrets`)), CODEX_SECRETS);
+    const agent = await pc('POST', `/api/companies/${company.id}/agents`, {
+      name: CODEX_AGENT,
+      role: 'general',
+      title: 'Runs scheduled jobs with Codex',
+      capabilities: 'Runs the repo skill each scheduled job names, then closes its task.',
+      adapterType: 'codex_local',
+      // The CLI engine runs the real codex CLI (`codex exec`), as the Runner runs the real claude CLI. No sandbox or
+      // approvals, as the Runner skips permissions: nobody is there to approve, and the job follows a written skill.
+      // No model: Codex's own default, which OpenAI keeps valid for ChatGPT sign-in; one picked in Paperclip is kept.
+      adapterConfig: { engine: 'cli', cwd: r?.adapterConfig?.cwd, dangerouslyBypassApprovalsAndSandbox: true, env },
+      runtimeConfig: { heartbeat: { enabled: false, intervalSec: 0, wakeOnDemand: true }, aiConnection: binding },
+      instructionsBundle: { entryFile: 'AGENTS.md', files: { 'AGENTS.md': fs.readFileSync(CODEX_MD, 'utf8') } },
+    });
+    log(`created Paperclip's "${CODEX_AGENT}" agent on the ChatGPT sign-in`);
+    return { agent, how: 'created' };
+  }
+  const agent = await pc('GET', `/api/agents/${existing.id}`);
+  if (JSON.stringify(agent.runtimeConfig?.aiConnection) !== JSON.stringify(binding)) {
+    await pc('PATCH', `/api/agents/${agent.id}`, { runtimeConfig: { ...(agent.runtimeConfig || {}), aiConnection: binding } });
+  }
+  await pc('POST', `/api/agents/${agent.id}/lifecycle/retry`, {}).catch(() => {});
+  return { agent, how: 'reconnected' };
+}
+
+// Codex in CloudCLI's chats and terminal signs in on its own (`codex login --device-auth` here).
+export const codexSignedIn = () => fs.existsSync(path.join(process.env.CODEX_HOME || path.join(H, '.codex'), 'auth.json'));
 
 export function validZone(z) {
   if (!z) return false;
@@ -318,13 +394,20 @@ export function writeLayer() {
     lines.push(`- No repo is picked yet, and jobs need one: each job runs a skill from it, pulled before every run. Send the user to step 3 of ${setupPage} rather than wiring one yourself: it clones the repo here, connects it to Paperclip's project and wires the shared memory.`);
   }
   lines.push(`- Scheduled jobs run in Paperclip as the "Runner" agent, on its own checkout of the job's repo. Its dashboard is ${paperclipPublicUrl || "Paperclip's public URL"} (same login as here): give the user links to jobs and runs there; the scheduled-jobs script prints them.`);
+  if (setup.codex?.done) {
+    lines.push('- A "Codex" agent in Paperclip can also run jobs, with OpenAI\'s Codex on the user\'s ChatGPT account. Jobs use the Runner (Claude) unless the user asks for Codex; then the scheduled-jobs skill\'s `--agent Codex` gives the job to it. Codex reads the same skill file in the repo.');
+  } else {
+    lines.push(`- Jobs can also run with OpenAI's Codex instead of Claude, on the user's ChatGPT account, once the user connects it in the "Optional: Codex" card of ${setupPage}. Mention it only when the user asks for Codex, ChatGPT or OpenAI.`);
+  }
   lines.push('- To list, create, change, pause, run or check jobs, use the `scheduled-jobs` skill.');
   lines.push(`- When the user greets you, asks what this is or what you can do, or seems unsure where to start, explain it in a few short lines. This server runs Claude on a schedule. They say in plain words what should be done and when; you write the job's instructions as a skill in their repo, schedule it in Paperclip and run it once to check. Paperclip then runs it on time and keeps every run: its status, what Claude did, and its usage, at ${paperclipPublicUrl || "Paperclip's address"} with the same login. They can also just work on their repo with you here, as with Claude Code anywhere. Then suggest two or three jobs that fit their repo (look at it first) and ask what they'd like.`);
   lines.push(`- The user's time zone is ${timezone()}: new jobs use it unless the user names another.`);
   if (!setup.claude?.done && !process.env.CLAUDE_CODE_OAUTH_TOKEN) {
-    lines.push(`- Setup isn't finished: Claude isn't connected for Paperclip's jobs yet. Send the user to step 1 of ${setupPage}.`);
+    lines.push(setup.codex?.done
+      ? `- Claude isn't connected for Paperclip's Runner, so only jobs given to Codex (\`--agent Codex\`) run. To run jobs with Claude, send the user to step 1 of ${setupPage}.`
+      : `- Setup isn't finished: Claude isn't connected for Paperclip's jobs yet. Send the user to step 1 of ${setupPage}.`);
   }
-  lines.push(`- The setup page, ${setupPage} (same login as here), connects Claude and GitHub, adds repos and sets the time zone; every step can be redone there.`);
+  lines.push(`- The setup page, ${setupPage} (same login as here), connects Claude and GitHub, adds repos, sets the time zone and, optionally, connects Codex; every step can be redone there.`);
   const block = `<!-- paperclip-cloudcli:start (rewritten at every start of this server; edit outside this block) -->\n${lines.join('\n')}\n<!-- paperclip-cloudcli:end -->`;
   const file = path.join(H, '.claude', 'CLAUDE.md');
   const old = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';

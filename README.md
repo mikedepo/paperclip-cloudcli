@@ -8,7 +8,7 @@ To use it, deploy the template from the link above. You don't need to clone this
 
 | Folder | Railway service | What it does |
 | --- | --- | --- |
-| [`paperclip/`](paperclip/) | Paperclip | Paperclip's official image (pinned to `2026.1023.0`) plus our start: the first admin from the deploy form, the company, project and Runner agent for your jobs, your repos, and the shared Claude memory. |
+| [`paperclip/`](paperclip/) | Paperclip | Paperclip's official image (pinned to `2026.1023.0`) plus our start: the first admin from the deploy form, the company, project and Runner agent for your jobs (and the optional Codex agent's upkeep), your repos, and the shared Claude memory. |
 | [`cloudcli/`](cloudcli/) | CloudCLI | Node's official image plus our start: installs CloudCLI, Claude Code, Codex and the GitHub CLI into the home folder's volume at the first start, serves the `/setup` page, and connects the `scheduled-jobs` skill to Paperclip. |
 
 The template adds a private Postgres database for Paperclip. Railway builds each service from its folder's `Dockerfile`.

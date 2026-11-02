@@ -6,6 +6,7 @@
 // 3. Makes sure the company "Jobs", a project for REPO_URL's repo (one project per repo, as CloudCLI's /setup adds
 //    them) and the "Runner" agent exist, keeps the Runner on the repo and its instructions current, and stores
 //    GH_TOKEN as the company secret GITHUB_TOKEN. Never renames a project or changes one that holds another repo.
+//    The optional "Codex" agent, once CloudCLI's /setup page has created it, is kept the same way (never created here).
 // Idempotent: the IDs it created are kept in /paperclip/.bundle/state.json. Never prints the password or a token.
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -19,8 +20,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const HOME = process.env.PAPERCLIP_HOME || '/paperclip';
 const STATE_FILE = path.join(HOME, '.bundle', 'state.json');
 const RUNNER_MD = fs.readFileSync(new URL('./runner.md', import.meta.url), 'utf8');
+const CODEX_MD = fs.readFileSync(new URL('./codex.md', import.meta.url), 'utf8');
 const COMPANY = 'Jobs';
 const AGENT = 'Runner';
+const CODEX = 'Codex';
 const base = `http://127.0.0.1:${process.env.PORT || 3100}`;
 const publicUrl = (process.env.PAPERCLIP_PUBLIC_URL || '').trim().replace(/\/+$/, '');
 const origin = publicUrl.startsWith('http') ? new URL(publicUrl).origin : base;
@@ -253,14 +256,48 @@ async function ensureRunner(company, cwd, state) {
     must(await call('PATCH', `/api/agents/${agent.id}`, { adapterConfig: { cwd } }), 'moving the Runner to the repo');
     log(`the Runner's working folder is now ${cwd}`);
   }
+  await keepInstructions(agent, RUNNER_MD, AGENT);
+  return agent;
+}
+
+// Rewrites an agent's AGENTS.md when it differs from the template's.
+async function keepInstructions(agent, content, name) {
   const cur = await call('GET', `/api/agents/${agent.id}/instructions-bundle/file?path=AGENTS.md`);
-  if (cur.json?.content !== RUNNER_MD) {
-    // Paperclip versions the entry file: an edit names the revision it replaces (or the hash of an unversioned file).
-    const base = cur.json?.revision?.id ? { baseRevisionId: cur.json.revision.id }
-      : cur.json?.contentHash ? { baseHash: cur.json.contentHash } : { baseRevisionId: null };
-    must(await call('PUT', `/api/agents/${agent.id}/instructions-bundle/file`, { path: 'AGENTS.md', content: RUNNER_MD, ...base }), "updating the Runner's instructions");
-    log("updated the Runner's instructions");
+  if (cur.json?.content === content) return;
+  // Paperclip versions the entry file: an edit names the revision it replaces (or the hash of an unversioned file).
+  const base = cur.json?.revision?.id ? { baseRevisionId: cur.json.revision.id }
+    : cur.json?.contentHash ? { baseHash: cur.json.contentHash } : { baseRevisionId: null };
+  must(await call('PUT', `/api/agents/${agent.id}/instructions-bundle/file`, { path: 'AGENTS.md', content, ...base }), `updating the ${name} agent's instructions`);
+  log(`updated the ${name} agent's instructions`);
+}
+
+// The optional "Codex" agent (codex_local, the user's ChatGPT account): CloudCLI's /setup page creates it when the user
+// connects Codex there (bound to that sign-in, so Paperclip's check of it passes at once); a server whose user never
+// does has none, and nothing here creates it. Once it exists, it is kept like the Runner: its working folder, its
+// instructions (codex.md) and a retry of Paperclip's check when it failed.
+async function keepCodex(company, cwd, state) {
+  let agent = null;
+  if (state.codexAgentId) {
+    const r = await call('GET', `/api/agents/${state.codexAgentId}`);
+    if (r.ok && r.json?.status !== 'terminated') agent = r.json;
   }
+  if (!agent) {
+    const found = list(await call('GET', `/api/companies/${company.id}/agents`))
+      .find((a) => a.name === CODEX && a.adapterType === 'codex_local' && a.status !== 'terminated');
+    if (found) agent = must(await call('GET', `/api/agents/${found.id}`), 'reading the Codex agent');
+  }
+  if (!agent) { delete state.codexAgentId; return null; }
+  state.codexAgentId = agent.id;
+  if (agent.lifecycleError) {
+    const r = await call('POST', `/api/agents/${agent.id}/lifecycle/retry`, {});
+    log(r.ok ? "retried Paperclip's check of the Codex agent (it runs Codex once)" : `retrying the Codex agent's check failed (${r.status})`);
+    if (!agent.runtimeConfig?.aiConnection) log("the Codex agent has no ChatGPT sign-in: connect Codex again on CloudCLI's /setup page (same login).");
+  }
+  if (agent.adapterConfig?.cwd !== cwd) {
+    must(await call('PATCH', `/api/agents/${agent.id}`, { adapterConfig: { cwd } }), 'moving the Codex agent to the repo');
+    log(`the Codex agent's working folder is now ${cwd}`);
+  }
+  await keepInstructions(agent, CODEX_MD, CODEX);
   return agent;
 }
 
@@ -301,9 +338,10 @@ async function main() {
   const project = await ensureProject(company, usable, state);
   const agent = await ensureRunner(company, cwd, state);
   state.agentId = agent.id;
+  const codex = await keepCodex(company, cwd, state).catch((e) => { log(`keeping the Codex agent failed (${e.message}); retried at the next start`); return null; });
   fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2) + '\n');
-  log(`ready: company "${company.name}", project "${project.name}", agent "${agent.name}" in ${cwd}`);
+  log(`ready: company "${company.name}", project "${project.name}", agent "${agent.name}"${codex ? ` and "${codex.name}"` : ''} in ${cwd}`);
 }
 
 main().catch((e) => log(`stopped: ${e.message}`));
