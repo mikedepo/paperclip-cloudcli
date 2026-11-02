@@ -1,0 +1,16 @@
+Copyright (c) 2026 AvgSoft. All rights reserved.
+
+This is not an open-source license. The code is source-available on these terms:
+
+You may read this code, and run it, as is or modified, as part of a deployment of the
+Paperclip (w/ CloudCLI) template on Railway (https://railway.com/deploy/paperclip-w-cloudcli).
+That includes keeping a copy for your own deployment, such as a fork or Railway's "Eject".
+
+You may not copy it into other products or templates, republish it, or sell it, without
+written permission from AvgSoft.
+
+These terms cover only the files in this repository. Paperclip, CloudCLI and the other tools
+the code installs or starts from keep their own licenses (see the README).
+
+The code is provided as is, without warranty of any kind. AvgSoft is not liable for any
+claim, damages or other liability arising from its use.

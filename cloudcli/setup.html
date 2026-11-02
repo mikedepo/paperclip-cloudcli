@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Set up your server</title>
+<style>
+  :root { color-scheme: dark; --bg: #0f1115; --card: #171a21; --line: #2a2f3a; --text: #e6e8ee; --sub: #9aa3b2; --accent: #3b82f6; --ok: #34d399; --bad: #f87171; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; }
+  main { max-width: 680px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  .lead { color: var(--sub); margin: 0 0 24px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin: 0 0 14px; }
+  .card h2 { font-size: 16px; margin: 0 0 6px; display: flex; gap: 10px; align-items: center; }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--sub); }
+  .pill.ok { color: var(--ok); border-color: var(--ok); }
+  .pills { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+  p { margin: 6px 0; color: var(--sub); }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; font: inherit; cursor: pointer; }
+  button.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); white-space: nowrap; }
+  button:disabled { opacity: .5; cursor: default; }
+  input, select { background: #0b0d11; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit; width: 100%; }
+  .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .row > input, .row > select { flex: 1 1 220px; width: auto; }
+  .code { font: 600 22px/1.2 ui-monospace, monospace; letter-spacing: 2px; color: var(--text); }
+  a { color: var(--accent); word-break: break-all; }
+  .err { color: var(--bad); }
+  .hidden { display: none; }
+  .small { font-size: 13px; }
+  .top { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
+  .brand { display: flex; gap: 14px; align-items: flex-start; }
+  .logo { flex: none; margin-top: 2px; }
+  a.btnlink { display: inline-flex; align-items: center; padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); text-decoration: none; word-break: normal; }
+  .example { color: var(--text); background: #0b0d11; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; cursor: copy; }
+  .example.copied { border-color: var(--ok); }
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <div class="brand"><svg class="logo" width="48" height="48" aria-hidden="true" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg"><defs><filter id="f-sh" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#0B1030" flood-opacity=".55"/></filter></defs>
+  <defs>
+    <linearGradient id="f-bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3B82F6"/><stop offset="1" stop-color="#1E40AF"/></linearGradient>
+    <linearGradient id="f-sheen" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFFFF" stop-opacity=".22"/><stop offset=".5" stop-color="#FFFFFF" stop-opacity="0"/></linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#f-bg)"/>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#f-sheen)"/>
+    
+  <rect x="34" y="70" width="176" height="146" rx="21.119999999999997" fill="#13111C"/>
+  <rect x="34" y="70" width="176" height="146" rx="21.119999999999997" fill="none" stroke="#FFFFFF" stroke-opacity=".14" stroke-width="2"/>
+  <circle cx="55.12" cy="91.9" r="6.16" fill="#F87171"/>
+  <circle cx="72.72" cy="91.9" r="6.16" fill="#FBBF24"/>
+  <circle cx="90.32" cy="91.9" r="6.16" fill="#34D399"/>
+  <path d="M62.16 131.32l26.4 20.44-26.4 20.44" fill="none" stroke="#60A5FA" stroke-width="11.440000000000001" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M104.4 175.12h35.2" stroke="#34D399" stroke-width="11.440000000000001" stroke-linecap="round"/>
+    <g filter="url(#f-sh)"><svg x="132" y="22" width="104" height="104" viewBox="0 0 24 24"><path fill="none" stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" d="m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551"/></svg></g></svg><div><h1>Set up your server</h1><p class="lead">Connect your own accounts once; CloudCLI and Paperclip both use them. Every step can be redone later on this page.</p></div></div>
+    <button class="ghost small" id="skip">Skip for now</button>
+  </div>
+
+  <section class="card hidden" id="login">
+    <h2>Sign in</h2>
+    <p>The email and password from the deploy form.</p>
+    <div class="row"><input id="email" type="email" placeholder="Email" autocomplete="username"><input id="password" type="password" placeholder="Password" autocomplete="current-password"></div>
+    <div class="row"><button id="signin">Sign in</button></div>
+    <p class="err" id="loginErr"></p>
+  </section>
+
+  <div id="steps" class="hidden">
+    <section class="card">
+      <h2>1. Claude <span class="pill" id="claudePill">not connected</span></h2>
+      <p>Runs Claude Code's own <code>claude setup-token</code> on your server. Open the link, sign in to your Claude account, and paste the code it shows back here. The token stays on your server: Claude Code in CloudCLI and Paperclip's Runner agent use it.</p>
+      <div class="row"><button id="claudeStart">Start</button></div>
+      <div id="claudeLink" class="hidden">
+        <p>1. Open this link and sign in: <a id="claudeUrl" target="_blank" rel="noopener"></a></p>
+        <p>2. Paste the code shown after signing in:</p>
+        <div class="row"><input id="claudeCode" placeholder="Code" autocomplete="off"><button id="claudeSend">Submit</button></div>
+      </div>
+      <p class="err" id="claudeErr"></p>
+    </section>
+
+    <section class="card">
+      <h2>2. GitHub <span class="pill" id="ghPill">not connected</span></h2>
+      <p>Signs the GitHub CLI in with a one-time code, so both apps can clone and push your repos.</p>
+      <div class="row"><button id="ghStart">Start</button></div>
+      <div id="ghCodeBox" class="hidden">
+        <p>Open <a id="ghUrl" target="_blank" rel="noopener" href="https://github.com/login/device">github.com/login/device</a> and enter this code:</p>
+        <p class="code" id="ghCode"></p>
+        <p class="small">This page updates once GitHub confirms.</p>
+      </div>
+      <p class="err" id="ghErr"></p>
+    </section>
+
+    <section class="card">
+      <h2>3. Your repo <span class="pills" id="repoPills"><span class="pill">none</span></span></h2>
+      <p>Cloned into CloudCLI's home folder, and checked out by Paperclip for the Runner's jobs. If it has <code>.claude/memory/</code>, Claude uses it as its memory.</p>
+      <p>You can add another repo any time: each one gets its own jobs, and a job runs on the repo of the chat it was made in.</p>
+      <div class="row"><button class="ghost" id="repoLoad">List my repos</button><select id="repoList" class="hidden"></select></div>
+      <div class="row"><input id="repoInput" placeholder="owner/name or https://github.com/owner/name"><button id="repoUse">Use this repo</button></div>
+      <p id="repoMsg"></p>
+      <p class="err" id="repoErr"></p>
+    </section>
+
+    <section class="card">
+      <h2>4. Time zone <span class="pill" id="tzPill">UTC</span></h2>
+      <p>Scheduled jobs and terminals use it, unless you name another zone for a job.</p>
+      <div class="row"><input id="tzInput"><button id="tzSave">Save</button></div>
+      <p class="err" id="tzErr"></p>
+    </section>
+
+    <section class="card" id="doneCard">
+      <h2>What next</h2>
+      <p>Tell Claude in CloudCLI what should be done and when, in plain words. Claude writes the job's instructions into your repo, schedules it in Paperclip and runs it once to check. Paperclip then runs it on time; every run's status, transcript and usage are on its dashboard, with the same login.</p>
+      <p>Try one of these in a new CloudCLI session (click to copy), or just say hi and Claude explains what it can do:</p>
+      <p class="example" title="Click to copy">Every weekday at 8:00, list the open issues in my repo with a one-line summary each.</p>
+      <p class="example" title="Click to copy">Every Monday at 9:00, summarize last week's commits in my repo.</p>
+      <p class="small">Claude must be connected (step 1) for the jobs to run.</p>
+      <div class="row"><button id="finish">Finish and open CloudCLI</button><a id="pcLink" class="btnlink hidden" target="_blank" rel="noopener">Open Paperclip</a></div>
+      <p class="err" id="finishErr"></p>
+    </section>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let token = localStorage.getItem('auth-token');
+let polling = null;
+let zoneSaved = false, reposListed = false, lastState = null;
+
+async function call(route, body) {
+  const r = await fetch('/setup/api/' + route, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: Object.assign({ 'content-type': 'application/json' }, token ? { authorization: 'Bearer ' + token } : {}),
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 401 && route !== 'login') { showLogin(); throw new Error('sign in first'); }
+  if (!r.ok) throw new Error(j.error || ('error ' + r.status));
+  return j;
+}
+function showLogin() { $('login').classList.remove('hidden'); $('steps').classList.add('hidden'); }
+function pill(id, text, ok) { $(id).textContent = text; $(id).classList.toggle('ok', !!ok); }
+
+function render(s) {
+  lastState = s;
+  $('login').classList.add('hidden'); $('steps').classList.remove('hidden');
+  pill('claudePill', s.claude.done ? 'connected' : s.claude.status === 'saving' ? 'saving' : 'not connected', s.claude.done);
+  $('claudeLink').classList.toggle('hidden', !s.claude.url);
+  if (s.claude.url) { $('claudeUrl').href = s.claude.url; $('claudeUrl').textContent = 'Sign in to Claude'; }
+  $('claudeErr').textContent = s.claude.done ? '' : (s.claude.error || '');
+  $('claudeStart').textContent = s.claude.done ? 'Redo' : 'Start';
+  pill('ghPill', s.github.done ? 'signed in as ' + s.github.user : 'not connected', s.github.done);
+  $('ghCodeBox').classList.toggle('hidden', !s.github.code);
+  if (s.github.code) { $('ghCode').textContent = s.github.code; $('ghUrl').href = s.github.url || 'https://github.com/login/device'; }
+  $('ghErr').textContent = s.github.done ? '' : (s.github.error || '');
+  $('ghStart').textContent = s.github.done ? 'Redo' : 'Start';
+  const pills = $('repoPills'); pills.textContent = '';
+  for (const r of s.repos.length ? s.repos : [null]) {
+    const p = document.createElement('span');
+    p.className = 'pill' + (r ? ' ok' : '');
+    p.textContent = r ? r.label : 'none';
+    if (r) p.title = r.dir;
+    pills.appendChild(p);
+  }
+  pill('tzPill', s.timezone.value, s.timezone.chosen);
+  if (!$('tzInput').value) $('tzInput').value = s.timezone.chosen ? s.timezone.value : (Intl.DateTimeFormat().resolvedOptions().timeZone || s.timezone.value);
+  if (s.links.paperclip) { $('pcLink').href = s.links.paperclip; $('pcLink').classList.remove('hidden'); }
+  // The browser's zone is saved without a click; Save is only for another zone.
+  const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (!s.timezone.chosen && browserZone && !zoneSaved) { zoneSaved = true; call('timezone', { timezone: browserZone }).then(render).catch(() => {}); }
+  if (s.github.done && !s.repos.length && !reposListed) { reposListed = true; $('repoLoad').click(); }
+  const busy = ['starting', 'waiting-code', 'checking', 'saving'].includes(s.claude.status) || ['starting', 'waiting-user'].includes(s.github.status);
+  if (busy && !polling) polling = setInterval(refresh, 3000);
+  if (!busy && polling) { clearInterval(polling); polling = null; }
+}
+async function refresh() { try { render(await call('state')); } catch (e) {} }
+// busy: what the button says while its step runs, so a slow start doesn't look frozen.
+function act(btn, errId, fn, busy) {
+  $(btn).onclick = async () => {
+    const label = $(btn).textContent;
+    $(btn).disabled = true; $(errId).textContent = '';
+    if (busy) $(btn).textContent = busy;
+    try { await fn(); } catch (e) { $(errId).textContent = e.message; } finally {
+      $(btn).disabled = false;
+      if (busy && $(btn).textContent === busy) $(btn).textContent = label;
+    }
+  };
+}
+
+act('signin', 'loginErr', async () => {
+  const j = await call('login', { username: $('email').value.trim(), password: $('password').value });
+  token = j.token; localStorage.setItem('auth-token', token); $('password').value = '';
+  await refresh();
+});
+act('claudeStart', 'claudeErr', async () => render(await call('claude/start', {})), 'Starting Claude Code, a few seconds…');
+act('claudeSend', 'claudeErr', async () => { render(await call('claude/code', { code: $('claudeCode').value })); $('claudeCode').value = ''; }, 'Checking the code…');
+act('ghStart', 'ghErr', async () => render(await call('github/start', {})), 'Asking GitHub for a code…');
+act('repoLoad', 'repoErr', async () => {
+  const { repos } = await call('github/repos');
+  const sel = $('repoList'); sel.textContent = '';
+  for (const r of repos) { const o = document.createElement('option'); o.value = r.name; o.textContent = r.name + (r.private ? ' (private)' : ''); sel.appendChild(o); }
+  sel.classList.toggle('hidden', !repos.length);
+  if (repos.length) $('repoInput').value = repos[0].name;
+  if (repos.length) $('repoMsg').textContent = lastState && lastState.repos.length ? 'Choose a repo to add, then press "Use this repo".' : 'Choose the repo for your jobs, then press "Use this repo".';
+  sel.onchange = () => { $('repoInput').value = sel.value; };
+}, 'Listing…');
+act('repoUse', 'repoErr', async () => {
+  $('repoMsg').textContent = 'Cloning...';
+  const r = await call('repo', { repo: $('repoInput').value });
+  $('repoMsg').textContent = (r.cloned ? 'Cloned into ' : 'In ') + r.dir + (r.memory ? ', with its .claude/memory/ as Claude\'s memory' : '') + '. ' + r.paperclip + '.';
+  render(r.state);
+}, 'Cloning…');
+act('tzSave', 'tzErr', async () => render(await call('timezone', { timezone: $('tzInput').value.trim() })));
+let finishWarned = false;
+act('finish', 'finishErr', async () => {
+  const s = await call('state');
+  if (!s.repos.length && !finishWarned) { finishWarned = true; throw new Error('No repo picked yet: jobs keep their instructions in it (step 3). Press Finish again to finish without one.'); }
+  await call('finish', {}); location.href = '/';
+});
+for (const el of document.querySelectorAll('.example')) {
+  el.onclick = async () => {
+    try { await navigator.clipboard.writeText(el.textContent); el.classList.add('copied'); setTimeout(() => el.classList.remove('copied'), 1500); } catch {}
+  };
+}
+$('skip').onclick = async () => { try { await call('skip', {}); location.href = '/'; } catch (e) {} };
+
+if (token) refresh(); else showLogin();
+</script>
+</body>
+</html>

@@ -1,0 +1,2 @@
+# The scripts run in Linux containers: keep LF line endings on every checkout.
+* text=auto eol=lf
