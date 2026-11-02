@@ -15,11 +15,12 @@ The template adds a private Postgres database for Paperclip. Railway builds each
 
 ## Updates
 
-When we change this repository, Railway tells you in your project that an update is available (it checks when you open the project).
+When we change this repository, Railway shows an **Update available** button on your project's canvas.
 
 - **Updates are opt-in.** Nothing changes in your deployment until you apply one, and you can skip any.
-- **Your data is kept.** An update rebuilds the services' code. The volumes (Paperclip's data, CloudCLI's home folder with your sign-ins, sessions and repo clones, and the database with your jobs and runs) stay as they are.
 - **Read the [CHANGELOG](CHANGELOG.md) first.** Each entry says what changed and anything you need to do.
+- **To apply it:** press **Update available**, then **Yes**. It updates one service at a time, so press it again for the other one (Paperclip, then CloudCLI). Or open a service's **Settings**, find **Upstream Repo** under Source, press **Check for updates**, then **Update**. Each service rebuilds and restarts, which takes a few minutes.
+- **Your data is kept.** An update replaces the services' code only. The volumes (Paperclip's data, CloudCLI's home folder with your sign-ins, sessions and repo clones, and the database with your jobs and runs) and your variables stay as they are.
 - Each service logs the commit it runs at start (`[paperclip-cloudcli] Paperclip service, code <commit>`), so you can tell which version you have.
 
 The tools CloudCLI installs keep their own update paths: CloudCLI's own Update button, and Claude Code and Codex update themselves. A newer CloudCLI you installed is kept.
