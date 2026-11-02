@@ -9,8 +9,8 @@ import path from 'node:path';
 
 const USAGE = `node jobs.mjs <command> [options]   (--json for raw output)
   list                                      every job: status, repo, schedule, next and last run
-  create "<title>" --prompt "<prompt>" [--cron "<min hour dom mon dow>"] [--tz <IANA zone, default: the server's TZ>] [--paused] [--agent <name>] [--repo <name or owner/name>]
-  update <job> [--title ...] [--prompt ...] [--cron ...] [--tz ...] [--repo ...]
+  create "<title>" --prompt "<prompt>" [--cron "<min hour dom mon dow>"] [--tz <IANA zone, default: the server's TZ>] [--paused] [--agent <name>] [--repo <name or owner/name>] [--secrets "NAME,NAME"]
+  update <job> [--title ...] [--prompt ...] [--cron ...] [--tz ...] [--repo ...] [--secrets ...]   (--secrets "" clears them)
   pause <job> | resume <job> | archive <job>
   run <job>                                 run it now
   runs <job> [--limit N]                    recent runs
@@ -261,7 +261,7 @@ const ABOUT = "Scheduled jobs on this repo, kept by the scheduled-jobs skill (ht
 const git = (dir, ...a) => spawnSync('git', ['-C', dir, ...a], { encoding: 'utf8', timeout: 120000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
 const gitError = (r) => String(r.stderr || r.stdout || r.error?.message || '').trim().split('\n').filter(Boolean).pop() || `exit ${r.status}`;
 const sameJob = (e, job) => (!!e.paperclipId && e.paperclipId === job.id) || String(e.title || '').toLowerCase() === job.title.toLowerCase();
-const describe = (e) => `"${e.title}" (${(e.schedules || (e.cron ? [e] : [])).map((s) => `${s.cron} ${s.timezone || ZONE}`).join('; ') || 'run by hand only'}, ${e.status || 'active'})`;
+const describe = (e) => `"${e.title}" (${(e.schedules || (e.cron ? [e] : [])).map((s) => `${s.cron} ${s.timezone || ZONE}`).join('; ') || 'run by hand only'}, ${e.status || 'active'}${e.secrets?.length ? `, needs ${e.secrets.join(', ')}` : ''})`;
 
 function readRecord(dir) {
   const file = path.join(dir, RECORD);
@@ -281,6 +281,28 @@ async function agentName(id) {
   return agentNames.get(id);
 }
 
+// The names (never the values) of the secrets and variables a job's skill needs. Paperclip binds them to the agent,
+// not the job, so the record is where a job's list is kept; a new server learns from it what to set up.
+const SECRETS = (() => {
+  if (opts.secrets === undefined) return undefined;
+  const names = String(opts.secrets).split(/[\s,]+/).filter(Boolean);
+  const bad = names.filter((n) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(n));
+  if (bad.length) die(`--secrets takes variable names (letters, digits, _), not values: ${bad.join(', ')}`);
+  return [...new Set(names)];
+})();
+const withSecrets = (entry, secrets) => {
+  const { secrets: _, paperclipId, ...rest } = entry;
+  return { ...rest, ...(secrets?.length ? { secrets } : {}), paperclipId };
+};
+
+// The job's secrets its agent doesn't have, as a line for the user ('' when none is missing).
+async function missingSecrets(job, secrets) {
+  if (!secrets?.length || !job.assigneeAgentId) return '';
+  const agent = await api('GET', `/api/agents/${job.assigneeAgentId}`, undefined, { allow404: true });
+  const missing = secrets.filter((n) => !(n in (agent?.adapterConfig?.env || {})));
+  return missing.length ? `"${job.title}" needs ${missing.join(', ')}, which ${agent?.name || 'its agent'} doesn't have yet: the user adds ${missing.length > 1 ? 'them' : 'it'} on ${agent?.name || 'the agent'}'s Secrets & variables page in Paperclip${agent && link('') ? ` (${link(`agents/${agent.id}`)})` : ''}.` : '';
+}
+
 // A job as the record keeps it: title, prompt, schedule, status; the agent only when it isn't the Runner.
 async function entryOf(job) {
   const s = schedules(job).map((t) => ({ cron: t.cronExpression, timezone: t.timezone }));
@@ -295,9 +317,11 @@ async function entryOf(job) {
 }
 
 // Puts a job's entry in place of its old one (same Paperclip ID, or its title before the change), or at the end.
-const put = (job, entry, oldTitle = job.title) => (jobs) => {
+// The old entry's secrets are kept unless `secrets` replaces them.
+const put = (job, entry, { oldTitle = job.title, secrets } = {}) => (jobs) => {
   const i = jobs.findIndex((x) => sameJob(x, job) || sameJob(x, { id: job.id, title: oldTitle }));
-  return i < 0 ? [...jobs, entry] : jobs.map((x, k) => (k === i ? entry : x));
+  const next = withSecrets(entry, secrets ?? jobs[i]?.secrets);
+  return i < 0 ? [...jobs, next] : jobs.map((x, k) => (k === i ? next : x));
 };
 const drop = (job) => (jobs) => jobs.filter((x) => !sameJob(x, job));
 
@@ -384,7 +408,9 @@ switch (cmd) {
       const stale = [];
       for (const j of live) {
         const e = (rec.jobs || []).find((x) => sameJob(x, j));
-        if (!e || JSON.stringify(e) !== JSON.stringify(await entryOf(j))) stale.push(j.title);
+        if (!e || JSON.stringify(e) !== JSON.stringify(withSecrets(await entryOf(j), e.secrets))) stale.push(j.title);
+        const lacking = await missingSecrets(j, e?.secrets);
+        if (lacking) notes.push(lacking);
       }
       if (only.length) notes.push(`${repoOf(p)}'s ${RECORD} lists jobs Paperclip doesn't have: ${only.map(describe).join('; ')}. Recreate them with: restore`);
       if (dir && stale.length) notes.push(`Not recorded as they are now in ${repoOf(p)}'s ${RECORD}: ${stale.map((t) => `"${t}"`).join(', ')}. Record them with: sync`);
@@ -398,8 +424,9 @@ switch (cmd) {
     if (!title || !opts.prompt) die('Usage: create "<title>" --prompt "Run the <skill> skill." [--cron "0 9 * * *"] [--tz Europe/Paris] [--paused]');
     const project = await projectFor(company);
     const full = await newJob(project, { title, prompt: opts.prompt, schedules: opts.cron ? [{ cron: opts.cron, timezone: opts.tz }] : [], status: opts.paused ? 'paused' : 'active' });
-    const record = await saveRecord(project, `Job "${full.title}" created: ${scheduleText(full)}, ${full.status}`, put(full, await entryOf(full)));
-    out({ ...full, repo: repoOf(project), record }, `Created job ${full.id.slice(0, 8)} "${full.title}" for ${ctx.agent.name} in project "${project.name}" (${projectRepos(project).length ? `repo ${repoOf(project)}` : 'no repo yet'}): ${scheduleText(full)}, ${full.status}. Test it: run "${full.title}". ${link(`routines/${full.id}`)}\n${record}`);
+    const record = await saveRecord(project, `Job "${full.title}" created: ${scheduleText(full)}, ${full.status}${SECRETS?.length ? `, needs ${SECRETS.join(', ')}` : ''}`, put(full, await entryOf(full), { secrets: SECRETS }));
+    const lacking = await missingSecrets(full, SECRETS);
+    out({ ...full, repo: repoOf(project), record }, `Created job ${full.id.slice(0, 8)} "${full.title}" for ${ctx.agent.name} in project "${project.name}" (${projectRepos(project).length ? `repo ${repoOf(project)}` : 'no repo yet'}): ${scheduleText(full)}, ${full.status}. Test it: run "${full.title}". ${link(`routines/${full.id}`)}\n${record}${lacking ? `\n${lacking}` : ''}`);
     break;
   }
   case 'update': {
@@ -417,16 +444,19 @@ switch (cmd) {
       opts.title && full.title !== job.title ? `renamed from "${job.title}"` : '',
       opts.prompt ? 'new prompt' : '',
       opts.cron || opts.tz ? `schedule ${scheduleText(full)}` : '',
+      SECRETS ? (SECRETS.length ? `needs ${SECRETS.join(', ')}` : 'needs no secrets') : '',
     ].filter(Boolean).join(', ');
     const records = [];
     if (moved) {
       const from = await projectById(job.projectId);
-      if (from) records.push(await saveRecord(from, `Job "${job.title}" moved to ${repoOf(moved)}`, drop(job)));
-      records.push(await saveRecord(moved, `Job "${full.title}" moved here from ${from ? repoOf(from) : 'no repo'}${changes ? `: ${changes}` : ''}`, put(full, await entryOf(full), job.title)));
+      let carried; // the job's secrets, from the record it leaves
+      if (from) records.push(await saveRecord(from, `Job "${job.title}" moved to ${repoOf(moved)}`, (jobs) => { carried = jobs.find((x) => sameJob(x, job))?.secrets; return drop(job)(jobs); }));
+      records.push(await saveRecord(moved, `Job "${full.title}" moved here from ${from ? repoOf(from) : 'no repo'}${changes ? `: ${changes}` : ''}`, put(full, await entryOf(full), { oldTitle: job.title, secrets: SECRETS ?? carried })));
     } else {
-      records.push(await saveRecord(await projectById(full.projectId), `Job "${full.title}" changed: ${changes || 'recorded again'}`, put(full, await entryOf(full), job.title)));
+      records.push(await saveRecord(await projectById(full.projectId), `Job "${full.title}" changed: ${changes || 'recorded again'}`, put(full, await entryOf(full), { oldTitle: job.title, secrets: SECRETS })));
     }
-    out({ ...full, record: records }, `Updated "${full.title}": ${scheduleText(full)}, ${full.status}${moved ? `, repo ${repoOf(moved)}` : ''}\n${records.join('\n')}`);
+    const lacking = await missingSecrets(full, SECRETS);
+    out({ ...full, record: records }, `Updated "${full.title}": ${scheduleText(full)}, ${full.status}${moved ? `, repo ${repoOf(moved)}` : ''}\n${records.join('\n')}${lacking ? `\n${lacking}` : ''}`);
     break;
   }
   case 'pause':
@@ -489,6 +519,10 @@ switch (cmd) {
       }
       const entries = await Promise.all(made.map(entryOf));
       lines.push(`${repoOf(p)}: recreated ${made.map((j) => `"${j.title}" (${scheduleText(j)}, ${j.status})`).join('; ')}.`);
+      for (const [i, j] of made.entries()) {
+        const lacking = await missingSecrets(j, todo[i].e.secrets);
+        if (lacking) lines.push(lacking);
+      }
       lines.push(await saveRecord(p, `Jobs recreated in Paperclip: ${made.map((j) => `"${j.title}"`).join(', ')}`, (jobs) => made.reduce((next, j, i) => put(j, entries[i])(next), jobs)));
     }
     out(lines, lines.join('\n') || 'No repo is connected.');
