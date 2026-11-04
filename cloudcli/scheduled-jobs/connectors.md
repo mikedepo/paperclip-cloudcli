@@ -59,7 +59,7 @@ When one of those holds, suggest the connector yourself; don't wait to be asked.
 
 Example: a daily digest sent to Telegram.
 - Paperclip's Telegram app is a channel only, and the community plugin above announces tasks but can't send a job's text.
-- So offer the Bot API's `sendMessage` in the skill now, with the bot token and chat ID as secrets.
+- So offer the Bot API's `sendMessage` in the skill now, with the bot token and chat ID as secrets. The user gets the token from @BotFather (`/newbot`), and their chat ID from @userinfobot (its "Id"); they press Start in their own bot once, or it can't message them. A bot never answers on its own: it only sends what the job sends.
 - Then propose a connector if other jobs or repos will post to Telegram, each repo has its own chat, or the user wants to answer the bot. Either add a send tool (and the version fix) to that plugin, or build a small one of our own that asks for less.
 
 ## 3. Building a connector on this server

@@ -13,7 +13,7 @@ const USAGE = `node jobs.mjs <command> [options]   (--json for raw output)
   create "<title>" --prompt "<prompt>" [--cron "<min hour dom mon dow>"] [--tz <IANA zone, default: the server's TZ>] [--paused] [--agent <name>] [--repo <name or owner/name>] [--secrets "NAME,NAME"]
   update <job> [--title ...] [--prompt ...] [--cron ...] [--tz ...] [--repo ...] [--agent ...] [--secrets ...]   (--secrets "" clears them)
   pause <job> | resume <job> | archive <job>
-  run <job>                                 run it now
+  run <job> [--wait]                        run it now; --wait: wait for the run to finish (up to 9 minutes), then print its log
   runs <job> [--limit N]                    recent runs
   log <job> [--run N] [--full]              a run's task status, summary, tokens and cost, and its log (default: the latest run)
   sync [--repo <name>]                      record every job in its repo's .claude/jobs.json (after changes made in Paperclip's dashboard)
@@ -33,7 +33,7 @@ for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a.startsWith('--')) {
     const k = a.slice(2);
-    if (['json', 'paused', 'full', 'help', 'yes'].includes(k)) opts[k] = true;
+    if (['json', 'paused', 'full', 'help', 'yes', 'wait'].includes(k)) opts[k] = true;
     else opts[k] = argv[++i];
   } else pos.push(a);
 }
@@ -316,7 +316,8 @@ async function missingSecrets(job, secrets) {
   if (!secrets?.length || !job.assigneeAgentId) return '';
   const agent = await api('GET', `/api/agents/${job.assigneeAgentId}`, undefined, { allow404: true });
   const missing = secrets.filter((n) => !(n in (agent?.adapterConfig?.env || {})));
-  return missing.length ? `"${job.title}" needs ${missing.join(', ')}, which ${agent?.name || 'its agent'} doesn't have yet: the user adds ${missing.length > 1 ? 'them' : 'it'} on ${agent?.name || 'the agent'}'s Secrets & variables page in Paperclip${agent && link('') ? ` (${link(`agents/${agent.id}`)})` : ''}.` : '';
+  // Paperclip adds a variable on the agent's Harness / Runtime page; its Secrets & variables page only lists them.
+  return missing.length ? `"${job.title}" needs ${missing.join(', ')}, which ${agent?.name || 'its agent'} doesn't have yet. The user adds ${missing.length > 1 ? 'each' : 'it'} on ${agent?.name || 'the agent'}'s Harness / Runtime page in Paperclip${agent && link('') ? ` (${link(`agents/${agent.id}/runtime`)})` : ''}: under Environment variables, Add variable, type the name, then choose "Organization secret" and "Create new secret..." for a key or token, or "Text value" for a plain setting such as a chat ID, and Save changes.` : '';
 }
 
 // A job as the record keeps it: title, prompt, schedule, status; the agent only when it isn't the Runner.
@@ -553,7 +554,25 @@ switch (cmd) {
   case 'run': {
     const job = await findJob(company, args[0]);
     const r = await api('POST', `/api/routines/${job.id}/run`, { source: 'manual' });
-    out(r, `Started "${job.title}": run ${String(r?.id || '').slice(0, 8)} ${r?.status || ''}. Read it with: log "${job.title}"`);
+    if (!opts.wait) {
+      out(r, `Started "${job.title}": run ${String(r?.id || '').slice(0, 8)} ${r?.status || ''}. Read it with: log "${job.title}"`);
+      break;
+    }
+    // Finished: its task is done, blocked or cancelled and no agent run on it is still queued or running (Paperclip
+    // may start a follow-up run to close a task), or the run never got a task (skipped, failed).
+    if (!opts.json) console.log(`Started "${job.title}", waiting for it to finish...`);
+    const until = Date.now() + 9 * 60e3; // under the 10 minutes a Claude Code command may take
+    let finished = false;
+    while (!finished && Date.now() < until) {
+      await new Promise((res) => setTimeout(res, 10000));
+      const run = (await jobRuns(job, 20)).find((x) => x.id === r?.id);
+      if (!run?.linkedIssueId) { finished = !!run && /skip|fail|error|cancel/i.test(run.status || ''); continue; }
+      const task = await api('GET', `/api/issues/${run.linkedIssueId}`);
+      const beats = arr(await api('GET', `/api/issues/${run.linkedIssueId}/runs`));
+      finished = ['done', 'blocked', 'cancelled'].includes(task.status) && !beats.some((b) => ['queued', 'running'].includes(b.status));
+    }
+    if (!finished && !opts.json) console.log(`Still running after 9 minutes; the log so far (read the rest later with: log "${job.title}"):`);
+    await showLog(job);
     break;
   }
   case 'runs': {

@@ -299,20 +299,27 @@ export function saveClaudeToken(token) {
 }
 // What creating and checking a job needs, approved once so a first job doesn't stop at five permission prompts.
 // CloudCLI's chat honors Claude Code's user settings on the server (in every browser, unlike its own "Allow &
-// remember"). Seeded once: a rule the user removes later stays removed. Everything else still asks.
+// remember"). Each rule is seeded once: a rule the user removes later stays removed, and a rule added in a later
+// version reaches existing servers at their next start. Everything else still asks.
 const JOB_RULES = [
   'Bash(node /home/node/.claude/skills/scheduled-jobs/jobs.mjs:*)', 'Bash(node ~/.claude/skills/scheduled-jobs/jobs.mjs:*)',
   'Monitor', 'Edit', 'Write',
   'Bash(git add:*)', 'Bash(git commit:*)', 'Bash(git push:*)', 'Bash(git pull:*)', 'Bash(git status:*)', 'Bash(git diff:*)', 'Bash(git log:*)',
   'Bash(gh issue list:*)', 'Bash(gh issue view:*)', 'Bash(gh pr list:*)', 'Bash(gh pr view:*)',
+  // 2026-11-04: the read-only GitHub commands Claude uses to check what a test run did.
+  'Bash(gh pr diff:*)', 'Bash(gh pr checks:*)', 'Bash(gh repo view:*)', 'Bash(gh run list:*)', 'Bash(gh run view:*)', 'Bash(gh auth status:*)',
 ];
+const FIRST_RULES = 16; // servers seeded before 2026-11-04 recorded only `permissionsSeeded: true`
 export function seedJobPermissions() {
-  if (readSetup().permissionsSeeded) return false;
+  const was = readSetup().permissionsSeeded;
+  const seeded = was === true ? JOB_RULES.slice(0, FIRST_RULES) : arr(was);
+  const add = JOB_RULES.filter((r) => !seeded.includes(r));
+  if (!add.length) return false;
   const file = path.join(H, '.claude', 'settings.json');
   const settings = readJson(file);
-  const allow = [...new Set([...(settings.permissions?.allow || []), ...JOB_RULES])];
+  const allow = [...new Set([...(settings.permissions?.allow || []), ...add])];
   mergeJson(file, { permissions: { ...(settings.permissions || {}), allow } }, 0o600);
-  updateSetup({ permissionsSeeded: true });
+  updateSetup({ permissionsSeeded: [...seeded, ...add] });
   return true;
 }
 
