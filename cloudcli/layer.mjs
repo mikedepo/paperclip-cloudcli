@@ -74,7 +74,9 @@ export async function upsertSecret(company, name, value) {
 // connection set up in Paperclip, git and gh would look for a GitHub login of Paperclip's own that doesn't exist).
 export const RUNNER_SECRETS = { CLAUDE_CODE_OAUTH_TOKEN: 'CLAUDE_CODE_OAUTH_TOKEN', GH_TOKEN: 'GITHUB_TOKEN', GITHUB_TOKEN: 'GITHUB_TOKEN' };
 // The Codex agent's: GitHub only. Its ChatGPT sign-in is Paperclip's own AI connection, bound in its runtimeConfig.
-export const CODEX_SECRETS = { GH_TOKEN: 'GITHUB_TOKEN', GITHUB_TOKEN: 'GITHUB_TOKEN' };
+// Paperclip keeps variables named *KEY*, *SECRET* or *TOKEN* out of Codex's commands, so the token is also GH_PAT,
+// which the gh wrapper on Paperclip's service (its start.sh) uses for gh and git.
+export const CODEX_SECRETS = { GH_TOKEN: 'GITHUB_TOKEN', GITHUB_TOKEN: 'GITHUB_TOKEN', GH_PAT: 'GITHUB_TOKEN' };
 
 // The env block with every `map` secret that exists bound as a secret_ref; `bound` lists the names newly bound.
 function secretEnv(secrets, map, current = {}) {

@@ -311,13 +311,16 @@ const withSecrets = (entry, secrets) => {
   return { ...rest, ...(secrets?.length ? { secrets } : {}), paperclipId };
 };
 
-// The job's secrets its agent doesn't have, as a line for the user ('' when none is missing).
+// The job's secrets its agent doesn't have, as a line for the user ('' when none is missing); for a Codex job, also
+// the names Codex won't see: Paperclip keeps variables named *KEY*, *SECRET* or *TOKEN* out of Codex's commands.
 async function missingSecrets(job, secrets) {
   if (!secrets?.length || !job.assigneeAgentId) return '';
   const agent = await api('GET', `/api/agents/${job.assigneeAgentId}`, undefined, { allow404: true });
-  const missing = secrets.filter((n) => !(n in (agent?.adapterConfig?.env || {})));
+  const hidden = agent?.adapterType === 'codex_local' ? secrets.filter((n) => /key|secret|token/i.test(n)) : [];
+  const rename = hidden.length ? `Codex never sees ${hidden.join(', ')}: Paperclip keeps variables whose names contain KEY, SECRET or TOKEN out of its commands. Rename ${hidden.length > 1 ? 'them' : 'it'} in the skill and with --secrets, for example TELEGRAM_BOT instead of TELEGRAM_BOT_TOKEN.` : '';
+  const missing = secrets.filter((n) => !(n in (agent?.adapterConfig?.env || {})) && !hidden.includes(n));
   // Paperclip adds a variable on the agent's Harness / Runtime page; its Secrets & variables page only lists them.
-  return missing.length ? `"${job.title}" needs ${missing.join(', ')}, which ${agent?.name || 'its agent'} doesn't have yet. The user adds ${missing.length > 1 ? 'each' : 'it'} on ${agent?.name || 'the agent'}'s Harness / Runtime page in Paperclip${agent && link('') ? ` (${link(`agents/${agent.id}/runtime`)})` : ''}: under Environment variables, Add variable, type the name, then choose "Organization secret" and "Create new secret..." for a key or token, or "Text value" for a plain setting such as a chat ID, and Save changes.` : '';
+  return [rename, missing.length ? `"${job.title}" needs ${missing.join(', ')}, which ${agent?.name || 'its agent'} doesn't have yet. The user adds ${missing.length > 1 ? 'each' : 'it'} on ${agent?.name || 'the agent'}'s Harness / Runtime page in Paperclip${agent && link('') ? ` (${link(`agents/${agent.id}/runtime`)})` : ''}: under Environment variables, Add variable, type the name, then choose "Organization secret" and "Create new secret..." for a key or token, or "Text value" for a plain setting such as a chat ID, and Save changes.` : ''].filter(Boolean).join('\n');
 }
 
 // A job as the record keeps it: title, prompt, schedule, status; the agent only when it isn't the Runner.
@@ -443,7 +446,7 @@ switch (cmd) {
     const full = await newJob(project, { title, prompt: opts.prompt, schedules: opts.cron ? [{ cron: opts.cron, timezone: opts.tz }] : [], status: opts.paused ? 'paused' : 'active' });
     const record = await saveRecord(project, `Job "${full.title}" created: ${scheduleText(full)}, ${full.status}${SECRETS?.length ? `, needs ${SECRETS.join(', ')}` : ''}`, put(full, await entryOf(full), { secrets: SECRETS }));
     const lacking = await missingSecrets(full, SECRETS);
-    out({ ...full, repo: repoOf(project), record }, `Created job ${full.id.slice(0, 8)} "${full.title}" for ${ctx.agent.name} in project "${project.name}" (${projectRepos(project).length ? `repo ${repoOf(project)}` : 'no repo yet'}): ${scheduleText(full)}, ${full.status}. Test it: run "${full.title}". ${link(`routines/${full.id}`)}\n${record}${lacking ? `\n${lacking}` : ''}`);
+    out({ ...full, repo: repoOf(project), record }, `Created job ${full.id.slice(0, 8)} "${full.title}" for ${ctx.agent.name} in project "${project.name}" (${projectRepos(project).length ? `repo ${repoOf(project)}` : 'no repo yet'}): ${scheduleText(full)}, ${full.status}. Test it: run "${full.title}" --wait. ${link(`routines/${full.id}`)}\n${record}${lacking ? `\n${lacking}` : ''}`);
     break;
   }
   case 'update': {
