@@ -1,6 +1,7 @@
 // Shared by wire.mjs (at every start) and front.mjs (the /setup page) on the CloudCLI service, as the node user:
 // the repo clone and shared-memory wiring, CloudCLI's project list, the setup state, the scheduled-jobs connection
-// file, and the instruction layer (the ~/.claude/CLAUDE.md block and the scheduled-jobs skill). Own names only.
+// file, and the instruction layer (the ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md blocks and the scheduled-jobs
+// skill, for Claude's and Codex's chats). Own names only.
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
@@ -13,6 +14,9 @@ export const CONFIG = path.join(H, '.config', 'scheduled-jobs', 'paperclip.json'
 export const SETUP = path.join(H, '.config', 'paperclip-cloudcli', 'setup.json');
 const SRC = path.join(path.dirname(new URL(import.meta.url).pathname), 'scheduled-jobs');
 const SKILL_DIR = path.join(H, '.claude', 'skills', 'scheduled-jobs');
+// Codex's user skills folder (Codex also reads ~/.codex/skills, deprecated): the skill is linked there, not copied.
+const CODEX_SKILL_LINK = path.join(H, '.agents', 'skills', 'scheduled-jobs');
+const codexHome = () => process.env.CODEX_HOME || path.join(H, '.codex');
 export const log = (m) => console.log(`[wiring] ${m}`);
 export const cloudcliUrl = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '';
 export const paperclipPublicUrl = (process.env.PAPERCLIP_PUBLIC_URL || '').replace(/\/+$/, '');
@@ -111,7 +115,7 @@ export async function bindRunnerSecrets() {
   return { runner, bound, codex, codexBound };
 }
 
-// ---------- Codex (optional): jobs run with the user's ChatGPT account ----------
+// ---------- Codex: jobs run with the user's ChatGPT account (step 1 of /setup, with or instead of Claude) ----------
 // The sign-in is Paperclip's own (its local AI sign-in: `codex login --device-auth` on Paperclip's server, the
 // credential kept encrypted as Paperclip's AI connection and refreshed by Paperclip); this page only relays the
 // one-time code. The "Codex" agent is created here once signed in, bound to that connection, so Paperclip's check of
@@ -168,7 +172,7 @@ export async function connectCodexAgent({ connectionId, grantId }) {
 }
 
 // Codex in CloudCLI's chats and terminal signs in on its own (`codex login --device-auth` here).
-export const codexSignedIn = () => fs.existsSync(path.join(process.env.CODEX_HOME || path.join(H, '.codex'), 'auth.json'));
+export const codexSignedIn = () => fs.existsSync(path.join(codexHome(), 'auth.json'));
 
 export function validZone(z) {
   if (!z) return false;
@@ -379,10 +383,12 @@ export async function repoProject(repo) {
   return { project, how: 'created' };
 }
 
-export function writeLayer() {
-  fs.mkdirSync(SKILL_DIR, { recursive: true });
-  for (const f of fs.readdirSync(SRC)) fs.copyFileSync(path.join(SRC, f), path.join(SKILL_DIR, f));
+// The block's lines for one chat assistant, `ai`: 'Claude' (~/.claude/CLAUDE.md) or 'Codex' (~/.codex/AGENTS.md).
+// Both get the same knowledge; the lines differ only where the assistant itself matters.
+function layerLines(ai) {
   const setup = readSetup();
+  const claudeJobs = !!setup.claude?.done || !!process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  const codexJobs = !!setup.codex?.done;
   const lines = [
     '# This server',
     '',
@@ -402,25 +408,62 @@ export function writeLayer() {
   } else {
     lines.push(`- No repo is picked yet, and jobs need one: each job runs a skill from it, pulled before every run. Send the user to step 3 of ${setupPage} rather than wiring one yourself: it clones the repo here, connects it to Paperclip's project and wires the shared memory.`);
   }
-  lines.push(`- Scheduled jobs run in Paperclip as the "Runner" agent, on its own checkout of the job's repo. Its dashboard is ${paperclipPublicUrl || "Paperclip's public URL"} (same login as here): give the user links to jobs and runs there; the scheduled-jobs script prints them.`);
-  if (setup.codex?.done) {
-    lines.push('- A "Codex" agent in Paperclip can also run jobs, with OpenAI\'s Codex on the user\'s ChatGPT account. Jobs use the Runner (Claude) unless the user asks for Codex; then the scheduled-jobs skill\'s `--agent Codex` gives the job to it. Codex reads the same skill file in the repo.');
+  // Which agent runs jobs follows what is connected; the jobs script picks the same default (jobs.mjs, `create`).
+  const board = `Its dashboard is ${paperclipPublicUrl || "Paperclip's public URL"} (same login as here): give the user links to jobs and runs there; the scheduled-jobs script prints them.`;
+  if (claudeJobs && codexJobs) {
+    lines.push(`- Scheduled jobs run in Paperclip, on its own checkout of the job's repo, by one of two agents: "Runner" (Claude Code, on the user's Claude account) or "Codex" (OpenAI's Codex, on the user's ChatGPT account). New jobs go to the Runner unless the user asks for Codex; then the scheduled-jobs skill's \`--agent Codex\` gives the job to it. Both read the same skill file in the repo. ${board}`);
+  } else if (codexJobs) {
+    lines.push(`- Scheduled jobs run in Paperclip as the "Codex" agent (OpenAI's Codex, on the user's ChatGPT account), on its own checkout of the job's repo: Claude isn't connected for Paperclip's "Runner" agent, so the scheduled-jobs script gives new jobs to Codex. To run jobs with Claude too, the user connects Claude in step 1 of ${setupPage}. ${board}`);
+  } else if (claudeJobs) {
+    lines.push(`- Scheduled jobs run in Paperclip as the "Runner" agent (Claude Code, on the user's Claude account), on its own checkout of the job's repo. ${board}`);
+    lines.push(`- Jobs can also run with OpenAI's Codex, on the user's ChatGPT account, once the user connects Codex in step 1 of ${setupPage}. Mention it only when the user asks for Codex, ChatGPT or OpenAI.`);
   } else {
-    lines.push(`- Jobs can also run with OpenAI's Codex instead of Claude, on the user's ChatGPT account, once the user connects it in the "Optional: Codex" card of ${setupPage}. Mention it only when the user asks for Codex, ChatGPT or OpenAI.`);
+    lines.push(`- Scheduled jobs run in Paperclip, on its own checkout of the job's repo, as the "Runner" agent (Claude Code) or the "Codex" agent (OpenAI's Codex). ${board}`);
+    lines.push(`- Setup isn't finished: neither Claude nor Codex is connected for Paperclip's jobs yet, so no job can run. Send the user to step 1 of ${setupPage} to connect Claude, Codex or both.`);
   }
-  lines.push('- To list, create, change, pause, run or check jobs, use the `scheduled-jobs` skill.');
-  lines.push(`- When the user greets you, asks what this is or what you can do, or seems unsure where to start, explain it in a few short lines. This server runs Claude on a schedule. They say in plain words what should be done and when; you write the job's instructions as a skill in their repo, schedule it in Paperclip and run it once to check. Paperclip then runs it on time and keeps every run: its status, what Claude did, and its usage, at ${paperclipPublicUrl || "Paperclip's address"} with the same login. They can also just work on their repo with you here, as with Claude Code anywhere. Then suggest two or three jobs that fit their repo (look at it first) and ask what they'd like.`);
+  lines.push(ai === 'Codex'
+    ? '- To list, create, change, pause, run or check jobs, use the `scheduled-jobs` skill: read `~/.claude/skills/scheduled-jobs/SKILL.md` first and follow it.'
+    : '- To list, create, change, pause, run or check jobs, use the `scheduled-jobs` skill.');
+  const runs = claudeJobs && codexJobs ? 'Claude or Codex' : codexJobs ? 'Codex' : 'Claude';
+  lines.push(`- When the user greets you, asks what this is or what you can do, or seems unsure where to start, explain it in a few short lines. This server runs ${runs} on a schedule. They say in plain words what should be done and when; you write the job's instructions as a skill in their repo, schedule it in Paperclip and run it once to check. Paperclip then runs it on time and keeps every run: its status, what the agent did, and its usage, at ${paperclipPublicUrl || "Paperclip's address"} with the same login. They can also just work on their repo with you here, as with ${ai === 'Codex' ? 'Codex' : 'Claude Code'} anywhere. Then suggest two or three jobs that fit their repo (look at it first) and ask what they'd like.`);
   lines.push(`- The user's time zone is ${timezone()}: new jobs use it unless the user names another.`);
-  if (!setup.claude?.done && !process.env.CLAUDE_CODE_OAUTH_TOKEN) {
-    lines.push(setup.codex?.done
-      ? `- Claude isn't connected for Paperclip's Runner, so only jobs given to Codex (\`--agent Codex\`) run. To run jobs with Claude, send the user to step 1 of ${setupPage}.`
-      : `- Setup isn't finished: Claude isn't connected for Paperclip's jobs yet. Send the user to step 1 of ${setupPage}.`);
+  if (ai === 'Codex') {
+    // CloudCLI runs Codex chats with `codex exec`, which refuses every approval request, and its workspace-write
+    // sandbox needs bubblewrap namespaces that Railway's containers deny: only Bypass Permissions runs anything.
+    lines.push('- Codex\'s sandbox can\'t start on this server (Railway\'s containers don\'t allow it), so in CloudCLI\'s Default and Accept Edits modes every command and file edit fails with "bwrap: Creating new namespace failed". When you see that, don\'t retry: tell the user to switch this chat to Bypass Permissions (the mode button under the message box) and send the message again. In Bypass Permissions nothing asks before it runs, so ask the user in the chat before anything destructive or beyond what they asked for: deleting files, force-pushing or rewriting git history, changing settings or accounts.');
   }
-  lines.push(`- The setup page, ${setupPage} (same login as here), connects Claude and GitHub, adds repos, sets the time zone and, optionally, connects Codex; every step can be redone there.`);
+  lines.push(`- The setup page, ${setupPage} (same login as here), connects Claude, Codex and GitHub, adds repos and sets the time zone; every step can be redone there.`);
+  return lines;
+}
+
+// Replaces the marked block in an instruction file, or puts it at the top; the rest of the file is the user's.
+const BLOCK = /<!-- paperclip-cloudcli:start[\s\S]*?<!-- paperclip-cloudcli:end -->/;
+function writeBlock(file, lines) {
   const block = `<!-- paperclip-cloudcli:start (rewritten at every start of this server; edit outside this block) -->\n${lines.join('\n')}\n<!-- paperclip-cloudcli:end -->`;
-  const file = path.join(H, '.claude', 'CLAUDE.md');
   const old = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
-  const re = /<!-- paperclip-cloudcli:start[\s\S]*?<!-- paperclip-cloudcli:end -->/;
-  const next = re.test(old) ? old.replace(re, block) : `${block}\n${old ? `\n${old}` : ''}`;
-  if (next !== old) fs.writeFileSync(file, next);
+  const next = BLOCK.test(old) ? old.replace(BLOCK, () => block) : `${block}\n${old ? `\n${old}` : ''}`;
+  if (next === old) return;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, next);
+}
+
+// Codex finds the skill in its user skills folder, through a link to Claude's copy. A folder of the user's own
+// there is left as is.
+function linkCodexSkill() {
+  let current = null;
+  try { current = fs.readlinkSync(CODEX_SKILL_LINK); } catch (e) {
+    if (e.code !== 'ENOENT') { if (e.code !== 'EINVAL') log(`linking the skill for Codex failed (${e.message})`); return; }
+  }
+  if (current === SKILL_DIR) return;
+  fs.mkdirSync(path.dirname(CODEX_SKILL_LINK), { recursive: true });
+  if (current !== null) fs.unlinkSync(CODEX_SKILL_LINK);
+  fs.symlinkSync(SKILL_DIR, CODEX_SKILL_LINK);
+}
+
+export function writeLayer() {
+  fs.mkdirSync(SKILL_DIR, { recursive: true });
+  for (const f of fs.readdirSync(SRC)) fs.copyFileSync(path.join(SRC, f), path.join(SKILL_DIR, f));
+  writeBlock(path.join(H, '.claude', 'CLAUDE.md'), layerLines('Claude'));
+  writeBlock(path.join(codexHome(), 'AGENTS.md'), layerLines('Codex'));
+  linkCodexSkill();
 }

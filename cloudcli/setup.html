@@ -12,7 +12,9 @@
   h1 { font-size: 24px; margin: 0 0 4px; }
   .lead { color: var(--sub); margin: 0 0 24px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin: 0 0 14px; }
-  .card h2 { font-size: 16px; margin: 0 0 6px; display: flex; gap: 10px; align-items: center; }
+  .card h2 { font-size: 16px; margin: 0 0 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .card h3 { font-size: 15px; margin: 14px 0 4px; }
+  .card h3.sub { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 18px; }
   .pill { font-size: 12px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--sub); }
   .pill.ok { color: var(--ok); border-color: var(--ok); }
   .pills { display: inline-flex; flex-wrap: wrap; gap: 6px; }
@@ -68,7 +70,9 @@
 
   <div id="steps" class="hidden">
     <section class="card">
-      <h2>1. Claude <span class="pill" id="claudePill">not connected</span></h2>
+      <h2>1. Claude, Codex, or both <span class="pills"><span class="pill" id="claudePill">Claude</span><span class="pill" id="codexPill">Codex</span></span></h2>
+      <p>The AI that writes your jobs in CloudCLI's chat and runs them in Paperclip. Either one is enough; with both, jobs run with Claude unless you ask for Codex.</p>
+      <h3>Claude</h3>
       <p>Runs Claude Code's own <code>claude setup-token</code> on your server. Open the link, sign in to your Claude account, and paste the code it shows back here. The token stays on your server: Claude Code in CloudCLI and Paperclip's Runner agent use it.</p>
       <div class="row"><button id="claudeStart">Start</button></div>
       <div id="claudeLink" class="hidden">
@@ -77,6 +81,23 @@
         <div class="row"><input id="claudeCode" placeholder="Code" autocomplete="off"><button id="claudeSend">Submit</button></div>
       </div>
       <p class="err" id="claudeErr"></p>
+      <h3 class="sub">Codex</h3>
+      <p>OpenAI's Codex, on your ChatGPT plan. It takes two one-time codes in a row: one for Paperclip's Codex agent, which runs jobs, then one for Codex in CloudCLI's chats. One sign-in can't serve both, since each would sign the other out. Chats need ChatGPT Plus or higher: on a free plan ChatGPT refuses the models CloudCLI offers, while jobs work.</p>
+      <p class="small">First, in ChatGPT: Settings, Security and login, turn on "Enable device code sign-in for Codex" (near the bottom).</p>
+      <div class="row"><button id="codexStart">Start</button></div>
+      <div id="codexCodeBox" class="hidden">
+        <p>Code 1 of 2, for jobs: open <a id="codexUrl" target="_blank" rel="noopener" href="https://auth.openai.com/codex/device">auth.openai.com/codex/device</a>, sign in to ChatGPT and enter:</p>
+        <p class="code" id="codexCode"></p>
+        <p class="small">This page updates once ChatGPT confirms, then shows the second code.</p>
+      </div>
+      <p class="err" id="codexErr"></p>
+      <div id="codexHereBox" class="hidden">
+        <p>Code 2 of 2, for CloudCLI's chats: open <a id="codexHereUrl" target="_blank" rel="noopener" href="https://auth.openai.com/codex/device">auth.openai.com/codex/device</a> again and enter:</p>
+        <p class="code" id="codexHereCode"></p>
+      </div>
+      <p class="err" id="codexHereErr"></p>
+      <p class="small" id="codexHereLine"><span id="codexHereText">Codex in CloudCLI's chats signs in with its own code.</span> <button class="ghost small" id="codexHereStart">Sign in for chats</button></p>
+      <p class="small hidden" id="codexMode">Codex chats here use CloudCLI's Bypass Permissions mode, which this page selects in this browser: Codex's sandbox can't start on Railway, so in the other modes Codex can't run commands or edit files. In that mode Codex doesn't ask before it acts.</p>
     </section>
 
     <section class="card">
@@ -108,32 +129,13 @@
       <p class="err" id="tzErr"></p>
     </section>
 
-    <section class="card" id="codexCard">
-      <h2>Optional: Codex <span class="pill" id="codexPill">not connected</span></h2>
-      <p>Jobs run with Claude. To run some with OpenAI's Codex instead, on your ChatGPT plan, connect it here: Paperclip signs Codex in on your server with a one-time code and adds a "Codex" agent. Then ask Claude to run a job with Codex.</p>
-      <p class="small">First, in ChatGPT: Settings, Security and login, turn on "Enable device code sign-in for Codex" (near the bottom).</p>
-      <div class="row"><button id="codexStart">Start</button></div>
-      <div id="codexCodeBox" class="hidden">
-        <p>Open <a id="codexUrl" target="_blank" rel="noopener" href="https://auth.openai.com/codex/device">auth.openai.com/codex/device</a>, sign in to ChatGPT and enter this code:</p>
-        <p class="code" id="codexCode"></p>
-        <p class="small">This page updates once ChatGPT confirms.</p>
-      </div>
-      <p class="err" id="codexErr"></p>
-      <p class="small" id="codexHereLine">Codex in CloudCLI's chats and terminal signs in separately, with its own code. <button class="ghost small" id="codexHereStart">Sign in Codex in CloudCLI</button></p>
-      <div id="codexHereBox" class="hidden">
-        <p>Open <a id="codexHereUrl" target="_blank" rel="noopener" href="https://auth.openai.com/codex/device">auth.openai.com/codex/device</a> and enter this code:</p>
-        <p class="code" id="codexHereCode"></p>
-      </div>
-      <p class="err" id="codexHereErr"></p>
-    </section>
-
     <section class="card" id="doneCard">
       <h2>What next</h2>
-      <p>Tell Claude in CloudCLI what should be done and when, in plain words. Claude writes the job's instructions into your repo, schedules it in Paperclip and runs it once to check. Paperclip then runs it on time; every run's status, transcript and usage are on its dashboard, with the same login.</p>
-      <p>Try one of these in a new CloudCLI session (click to copy), or just say hi and Claude explains what it can do:</p>
+      <p>Tell Claude or Codex in CloudCLI what should be done and when, in plain words. It writes the job's instructions into your repo, schedules it in Paperclip and runs it once to check. Paperclip then runs it on time; every run's status, transcript and usage are on its dashboard, with the same login.</p>
+      <p>Try one of these in a new CloudCLI session (click to copy), or just say hi to hear what it can do:</p>
       <p class="example" title="Click to copy">Every weekday at 8:00, list the open issues in my repo with a one-line summary each.</p>
       <p class="example" title="Click to copy">Every Monday at 9:00, summarize last week's commits in my repo.</p>
-      <p class="small">Claude must be connected (step 1) for the jobs to run, or Codex for the jobs given to it.</p>
+      <p class="small">Jobs run once Claude or Codex is connected (step 1).</p>
       <div class="row"><button id="finish">Finish and open CloudCLI</button><a id="pcLink" class="btnlink hidden" target="_blank" rel="noopener">Open Paperclip</a></div>
       <p class="err" id="finishErr"></p>
     </section>
@@ -162,7 +164,7 @@ function pill(id, text, ok) { $(id).textContent = text; $(id).classList.toggle('
 function render(s) {
   lastState = s;
   $('login').classList.add('hidden'); $('steps').classList.remove('hidden');
-  pill('claudePill', s.claude.done ? 'connected' : s.claude.status === 'saving' ? 'saving' : 'not connected', s.claude.done);
+  pill('claudePill', 'Claude: ' + (s.claude.done ? 'connected' : s.claude.status === 'saving' ? 'saving' : 'not connected'), s.claude.done);
   $('claudeLink').classList.toggle('hidden', !s.claude.url);
   if (s.claude.url) { $('claudeUrl').href = s.claude.url; $('claudeUrl').textContent = 'Sign in to Claude'; }
   $('claudeErr').textContent = s.claude.done ? '' : (s.claude.error || '');
@@ -181,15 +183,28 @@ function render(s) {
     pills.appendChild(p);
   }
   const cx = s.codex;
-  pill('codexPill', cx.done ? 'connected' : cx.status === 'saving' ? 'saving' : 'not connected', cx.done);
+  pill('codexPill', 'Codex: ' + (cx.done && cx.here.done ? 'connected' : cx.status === 'saving' ? 'saving' : cx.done ? 'jobs only' : cx.here.done ? 'chats only' : 'not connected'), cx.done);
   $('codexCodeBox').classList.toggle('hidden', !cx.code);
   if (cx.code) { $('codexCode').textContent = cx.code; if (cx.url) $('codexUrl').href = cx.url; }
   $('codexErr').textContent = cx.status === 'error' ? (cx.error || '') : '';
   $('codexStart').textContent = cx.done ? 'Redo' : 'Start';
-  $('codexHereStart').textContent = cx.here.done ? 'Sign in again' : 'Sign in Codex in CloudCLI';
   $('codexHereBox').classList.toggle('hidden', !cx.here.code);
   if (cx.here.code) { $('codexHereCode').textContent = cx.here.code; if (cx.here.url) $('codexHereUrl').href = cx.here.url; }
   $('codexHereErr').textContent = cx.here.status === 'error' ? (cx.here.error || '') : '';
+  $('codexHereLine').classList.toggle('hidden', !!cx.here.code);
+  $('codexHereText').textContent = cx.here.done ? 'Codex is signed in for CloudCLI\'s chats.' : 'Codex in CloudCLI\'s chats signs in with its own code.';
+  $('codexHereStart').textContent = cx.here.done ? 'Sign in again' : 'Sign in for chats';
+  $('codexMode').classList.toggle('hidden', !cx.here.done);
+  // CloudCLI keeps each browser's last permission mode per assistant here. Set once per browser, so a mode the user
+  // picks later is kept.
+  if (cx.here.done) {
+    try {
+      if (!localStorage.getItem('paperclip-cloudcli-codex-mode')) {
+        localStorage.setItem('permissionMode-last-codex', 'bypassPermissions');
+        localStorage.setItem('paperclip-cloudcli-codex-mode', 'bypassPermissions');
+      }
+    } catch (e) {}
+  }
   pill('tzPill', s.timezone.value, s.timezone.chosen);
   if (!$('tzInput').value) $('tzInput').value = s.timezone.chosen ? s.timezone.value : (Intl.DateTimeFormat().resolvedOptions().timeZone || s.timezone.value);
   if (s.links.paperclip) { $('pcLink').href = s.links.paperclip; $('pcLink').classList.remove('hidden'); }

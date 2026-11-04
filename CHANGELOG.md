@@ -2,7 +2,7 @@
 
 Each entry is an update Railway offers to existing deployments of the template. Updates are opt-in: nothing changes until you apply one, and your data is kept (see the README).
 
-## 2026-11-02 (5)
+## 2026-11-04
 
 - Jobs can run with OpenAI's Codex instead of Claude, on your ChatGPT plan. It is optional: the setup page's new "Optional: Codex" card signs Codex in on your server with a one-time code (first turn on "Enable device code sign-in for Codex" in ChatGPT, Settings, Security and login) and adds a "Codex" agent in Paperclip. Then ask Claude to run a job with Codex. Claude's Runner stays the default, and your Runner and jobs are unchanged. Codex jobs reach GitHub as the Runner's do. A Codex job's own keys are named without KEY, SECRET or TOKEN, because Paperclip keeps such variables out of Codex's commands; Claude names them that way, and the jobs script warns otherwise.
 - The same card can sign in Codex for CloudCLI's own chats and terminal, with a second code.

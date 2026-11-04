@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // The scheduled-jobs skill's script: this server's jobs, which are Paperclip routines run by the "Runner" agent
-// (Claude), or by the optional "Codex" agent for the jobs given to it.
+// (Claude) or the "Codex" agent (OpenAI's Codex), whichever the user connected; with both, the Runner by default.
 // Talks to Paperclip's REST API over Railway's private network with the board API key the template stored in
 // ~/.config/scheduled-jobs/paperclip.json. Part of AvgSoft's Paperclip + CloudCLI template; rewritten at every start.
 import { spawnSync } from 'node:child_process';
@@ -22,7 +22,8 @@ const USAGE = `node jobs.mjs <command> [options]   (--json for raw output)
 <job> is a job's title (any case) or the start of its ID.
 A job runs on one repo: the one the current folder is in (its git remote), or the one --repo names.
 Every change to a job is recorded in its repo's .claude/jobs.json, committed and pushed.
---agent: Runner (Claude, the default) or Codex (OpenAI's Codex, once connected on /setup).`;
+--agent: Runner (Claude) or Codex (OpenAI's Codex). Without it, create uses the Runner when Claude is connected for
+Paperclip, and Codex when only Codex is.`;
 
 const CONFIG = path.join(os.homedir(), '.config', 'scheduled-jobs', 'paperclip.json');
 const SETUP = path.join(os.homedir(), '.config', 'paperclip-cloudcli', 'setup.json');
@@ -73,18 +74,31 @@ const when = (t) => (t ? new Intl.DateTimeFormat('sv-SE', { timeZone: ZONE, date
 let PREFIX = '';
 const link = (p) => (cfg.publicUrl ? `${cfg.publicUrl}/${PREFIX ? PREFIX + '/' : ''}${p}` : '');
 
-async function context(agentName = 'Runner') {
+// An agent whose runs go ahead: Paperclip's check of its sign-in passed and it isn't paused. The Runner of a server
+// set up with Codex only fails that check (no Claude sign-in).
+const ready = (a) => !!a && !['paused', 'error', 'terminated'].includes(a.status) && !a.lifecycleError && (!a.lifecycleState || a.lifecycleState === 'ready');
+
+// The company and the agent a command works with: the one named, or, with no name (create without --agent), the
+// Runner while it is ready, else Codex when it is (only Codex connected), else the Runner, whose jobs then wait.
+async function context(agentName) {
   const companies = arr(await api('GET', '/api/companies')).filter((c) => c.status !== 'archived');
   if (!companies.length) die('Paperclip has no company yet; the template creates "Jobs" at Paperclip\'s start (check its log for "[wiring]").');
   for (const company of companies) {
-    const agents = arr(await api('GET', `/api/companies/${company.id}/agents`));
-    const agent = agents.find((a) => a.name.toLowerCase() === agentName.toLowerCase() && a.status !== 'terminated');
-    if (agent) return { company, agent };
+    const agents = arr(await api('GET', `/api/companies/${company.id}/agents`)).filter((a) => a.status !== 'terminated');
+    const named = (n) => agents.find((a) => a.name.toLowerCase() === n.toLowerCase());
+    if (agentName) {
+      if (named(agentName)) return { company, agent: named(agentName) };
+      continue;
+    }
+    const runner = named('Runner');
+    const codex = agents.find((a) => a.name === 'Codex' && a.adapterType === 'codex_local');
+    if (!ready(runner) && ready(codex)) return { company, agent: codex, fallback: true };
+    if (runner) return { company, agent: runner };
   }
-  die(noAgent(agentName));
+  die(noAgent(agentName || 'Runner'));
 }
 const noAgent = (name) => (/^codex$/i.test(String(name))
-  ? `No "Codex" agent in Paperclip yet: the user connects Codex (their ChatGPT account) in the "Optional: Codex" card of ${SETUP_PAGE} (same login), which creates it. Then run this again.`
+  ? `No "Codex" agent in Paperclip yet: the user connects Codex (their ChatGPT account) in step 1 of ${SETUP_PAGE} (same login), which creates it. Then run this again.`
   : `No agent named "${name}" in Paperclip (the template's are "Runner", and "Codex" once connected on ${SETUP_PAGE}).`);
 
 // ---- repos: each connected repo has its own Paperclip project, whose primary workspace it is ----
@@ -261,7 +275,7 @@ async function showLog(job) {
   const agent = job.assigneeAgentId ? await api('GET', `/api/agents/${job.assigneeAgentId}`, undefined, { allow404: true }) : null;
   if (agent && (agent.status === 'paused' || agent.lifecycleError)) {
     lines.push(`Agent ${agent.name} is ${agent.status}${agent.lifecycleError ? ` (${agent.lifecycleError})` : ''}: its runs wait. ${agent.adapterType === 'codex_local'
-      ? `The Codex agent waits until Paperclip's check of its ChatGPT sign-in passes; the fix: connect Codex again in the "Optional: Codex" card of ${SETUP_PAGE} (same login), which signs it in and retries the agent.`
+      ? `The Codex agent waits until Paperclip's check of its ChatGPT sign-in passes; the fix: connect Codex again in step 1 of ${SETUP_PAGE} (same login), which signs it in and retries the agent.`
       : `A new Claude agent stays paused until Paperclip's check of its Claude sign-in passes; the fix: connect Claude on ${SETUP_PAGE} (same login), which gives Paperclip the token and retries the agent (or sign in to Claude on the agent's configuration page in Paperclip and press Retry).`}`);
   }
   if (cfg.publicUrl) lines.push(`Job: ${link(`routines/${job.id}`)}`);
@@ -402,7 +416,7 @@ async function newJob(project, { title, prompt, schedules: list = [], status = '
 const projectById = async (id) => (id ? (await projects(company, true)).find((p) => p.id === id) || null : null);
 const reposToCheck = async () => (opts.repo ? [await projectFor(company)] : (await projects(company)).filter((p) => projectRepos(p).length));
 
-const ctx = await context(cmd === 'create' && opts.agent ? opts.agent : 'Runner');
+const ctx = await context(cmd === 'create' ? opts.agent : 'Runner');
 const { company } = ctx;
 PREFIX = company.issuePrefix || '';
 
@@ -446,7 +460,8 @@ switch (cmd) {
     const full = await newJob(project, { title, prompt: opts.prompt, schedules: opts.cron ? [{ cron: opts.cron, timezone: opts.tz }] : [], status: opts.paused ? 'paused' : 'active' });
     const record = await saveRecord(project, `Job "${full.title}" created: ${scheduleText(full)}, ${full.status}${SECRETS?.length ? `, needs ${SECRETS.join(', ')}` : ''}`, put(full, await entryOf(full), { secrets: SECRETS }));
     const lacking = await missingSecrets(full, SECRETS);
-    out({ ...full, repo: repoOf(project), record }, `Created job ${full.id.slice(0, 8)} "${full.title}" for ${ctx.agent.name} in project "${project.name}" (${projectRepos(project).length ? `repo ${repoOf(project)}` : 'no repo yet'}): ${scheduleText(full)}, ${full.status}. Test it: run "${full.title}" --wait. ${link(`routines/${full.id}`)}\n${record}${lacking ? `\n${lacking}` : ''}`);
+    const why = ctx.fallback ? `\nIt runs with Codex: Claude isn't connected for Paperclip's Runner. Once it is, the job can move with: update "${full.title}" --agent Runner` : '';
+    out({ ...full, repo: repoOf(project), record }, `Created job ${full.id.slice(0, 8)} "${full.title}" for ${ctx.agent.name} in project "${project.name}" (${projectRepos(project).length ? `repo ${repoOf(project)}` : 'no repo yet'}): ${scheduleText(full)}, ${full.status}. Test it: run "${full.title}" --wait. ${link(`routines/${full.id}`)}${why}\n${record}${lacking ? `\n${lacking}` : ''}`);
     break;
   }
   case 'update': {
@@ -534,7 +549,7 @@ switch (cmd) {
         const agent = e.agent ? agents.find((a) => a.name.toLowerCase() === String(e.agent).toLowerCase()) : ctx.agent;
         if (archived) lines.push(`${repoOf(p)}: "${e.title}" was archived in Paperclip's dashboard; skipped. Run sync to drop it from the record.`);
         else if (!e.title || !e.prompt) lines.push(`${repoOf(p)}: an entry without a title or prompt; skipped.`);
-        else if (!agent) lines.push(`${repoOf(p)}: "${e.title}" is for the agent "${e.agent}", which Paperclip doesn't have; skipped.${/^codex$/i.test(String(e.agent)) ? ` Connect Codex in the "Optional: Codex" card of ${SETUP_PAGE}, then restore again.` : ''}`);
+        else if (!agent) lines.push(`${repoOf(p)}: "${e.title}" is for the agent "${e.agent}", which Paperclip doesn't have; skipped.${/^codex$/i.test(String(e.agent)) ? ` Connect Codex in step 1 of ${SETUP_PAGE}, then restore again.` : ''}`);
         else todo.push({ e, agent });
       }
       if (!todo.length) { lines.push(`${repoOf(p)}: nothing to recreate (${rec.jobs.length} recorded).`); continue; }

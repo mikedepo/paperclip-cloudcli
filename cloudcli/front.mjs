@@ -2,15 +2,16 @@
 // - Everything except /setup goes to CloudCLI unchanged (HTTP and WebSocket), which listens on an inner port.
 // - /setup: the one-time setup page, behind CloudCLI's own login (the page reuses CloudCLI's sign-in token; the
 //   password is only passed through to CloudCLI's login API, never stored). Steps, each one can be redone:
-//   1. Claude: runs the official `claude setup-token` in a terminal and relays what it prints (the sign-in link) and
+//   1. Claude, Codex, or both (either one finishes setup):
+//      Claude: runs the official `claude setup-token` in a terminal and relays what it prints (the sign-in link) and
 //      the code the user pastes back; the token it prints goes to Claude Code's user settings here and to Paperclip
 //      (company secret CLAUDE_CODE_OAUTH_TOKEN, referenced by the Runner agent), with no redeploy.
+//      Codex: two one-time codes in a row, since one ChatGPT sign-in can't serve two servers: Paperclip's own ChatGPT
+//      sign-in for a "Codex" agent that runs jobs, then `codex login --device-auth` here for CloudCLI's Codex chats.
 //   2. GitHub: `gh auth login --web` (device code), then `gh auth setup-git`; the token becomes Paperclip's GITHUB_TOKEN.
 //   3. Repos: adds a repo (never replaces one): clones it into the home folder and gives it its own project in
 //      Paperclip, whose primary workspace it is, so each repo's jobs run on that repo.
 //   4. Time zone: from the browser; used by the scheduled-jobs script and terminals here.
-//   Optional, Codex: Paperclip's own ChatGPT sign-in (device code) for a "Codex" agent that runs the jobs given to it,
-//      and, separately, `codex login --device-auth` for Codex in CloudCLI.
 // - Until setup is done or skipped, opening CloudCLI's home page redirects to /setup.
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -207,7 +208,7 @@ function repoList() {
   });
 }
 
-// ---------- optional: Codex, for Paperclip's jobs (Paperclip's own ChatGPT sign-in) and for CloudCLI ----------
+// ---------- step 1, Codex: for Paperclip's jobs (Paperclip's own ChatGPT sign-in), then for CloudCLI's chats ----------
 
 const DEVICE_HINT = 'If ChatGPT said device code sign-in is off: in ChatGPT, Settings, Security and login, turn on "Enable device code sign-in for Codex" (near the bottom), then press Start again.';
 let codex = null; // Paperclip's sign-in: { status, url, code, error }
@@ -248,10 +249,14 @@ async function codexSignIn(job) {
   job.status = 'saving';
   const saved = await pc('POST', base, { ...intent, localSessionId: sessionId });
   const { how } = await connectCodexAgent(saved);
-  updateSetup({ codex: { done: true, at: new Date().toISOString() } });
+  updateSetup({ codex: { done: true, at: new Date().toISOString() }, done: true });
   writeLayer();
   job.status = 'done';
   say(`Codex connected for Paperclip's jobs (agent "Codex" ${how})`);
+  // The second code, for CloudCLI's chats, right away: the user is still on ChatGPT's device page.
+  if (!codexSignedIn()) {
+    try { codexHereStart(); } catch (e) { say(`starting Codex's sign-in for CloudCLI failed (${e.message})`); }
+  }
 }
 
 // Codex in CloudCLI's chats and terminal: its own sign-in, here (a second one-time code). The same credential can't

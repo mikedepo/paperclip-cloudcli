@@ -1,6 +1,6 @@
 # Outside services for jobs
 
-Read this when a job must reach a service outside its repo: send its result to a chat or an inbox, read messages, call a third-party API. Jobs run in Paperclip, on the other Railway service, as the Runner agent (or Codex). Claude Code's own MCP servers and plugins in this chat don't reach them.
+Read this when a job must reach a service outside its repo: send its result to a chat or an inbox, read messages, call a third-party API. Jobs run in Paperclip, on the other Railway service, as the Runner agent (or Codex). The MCP servers and plugins of this chat (Claude Code's or Codex's) don't reach them.
 
 ## 1. Look for what exists: Paperclip's own, then what others published
 

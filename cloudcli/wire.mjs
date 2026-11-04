@@ -2,7 +2,8 @@
 // once CloudCLI answers. The login (email, then password) comes on stdin and is never printed or stored.
 // 1. Clones REPO_URL into ~/<name> (once; the advanced route, /setup adds repos otherwise). For every connected repo,
 //    points Claude Code's auto memory at its .claude/memory/ when there is one, and adds it to CloudCLI's projects.
-// 2. The instruction layer, rewritten every time so template updates reach existing installs (layer.mjs).
+// 2. The instruction layer, for Claude's and Codex's chats, rewritten every time so template updates reach existing
+//    installs (layer.mjs).
 // 3. Connects the skill and the /setup page to Paperclip: signs in with the login and creates a board API key named
 //    "CloudCLI scheduled-jobs" (kept in ~/.config/scheduled-jobs/paperclip.json, mode 600), unless the stored one works.
 import fs from 'node:fs';
@@ -76,7 +77,7 @@ for (const r of repos()) {
   addProject(r);
 }
 writeLayer();
-log('instruction layer written: ~/.claude/CLAUDE.md block and the scheduled-jobs skill');
+log('instruction layer written: the ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md blocks and the scheduled-jobs skill (linked for Codex in ~/.agents/skills)');
 if (seedJobPermissions()) log("approved what creating a job needs in Claude Code's user settings (the jobs script, file edits, basic git and gh); everything else still asks");
 
 // CloudCLI's own first-run wizard (git name and email, then agent sign-ins) repeats what this template already does:
