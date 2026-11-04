@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// The scheduled-jobs skill's script: this server's jobs, which are Paperclip routines run by the "Runner" agent.
+// The scheduled-jobs skill's script: this server's jobs, which are Paperclip routines run by the "Runner" agent
+// (Claude), or by the optional "Codex" agent for the jobs given to it.
 // Talks to Paperclip's REST API over Railway's private network with the board API key the template stored in
 // ~/.config/scheduled-jobs/paperclip.json. Part of AvgSoft's Paperclip + CloudCLI template; rewritten at every start.
 import { spawnSync } from 'node:child_process';
@@ -10,16 +11,18 @@ import path from 'node:path';
 const USAGE = `node jobs.mjs <command> [options]   (--json for raw output)
   list                                      every job: status, repo, schedule, next and last run
   create "<title>" --prompt "<prompt>" [--cron "<min hour dom mon dow>"] [--tz <IANA zone, default: the server's TZ>] [--paused] [--agent <name>] [--repo <name or owner/name>] [--secrets "NAME,NAME"]
-  update <job> [--title ...] [--prompt ...] [--cron ...] [--tz ...] [--repo ...] [--secrets ...]   (--secrets "" clears them)
+  update <job> [--title ...] [--prompt ...] [--cron ...] [--tz ...] [--repo ...] [--agent ...] [--secrets ...]   (--secrets "" clears them)
   pause <job> | resume <job> | archive <job>
-  run <job>                                 run it now
+  run <job> [--wait]                        run it now; --wait: wait for the run to finish (up to 9 minutes), then print its log
   runs <job> [--limit N]                    recent runs
   log <job> [--run N] [--full]              a run's task status, summary, tokens and cost, and its log (default: the latest run)
   sync [--repo <name>]                      record every job in its repo's .claude/jobs.json (after changes made in Paperclip's dashboard)
   restore [--repo <name>] [--yes]           recreate the jobs the repos' .claude/jobs.json list that Paperclip doesn't have (a new server); without --yes, only shows them
+  connectors [<service>]                    what exists for an outside service (telegram, slack, email...): Paperclip's apps, the connections set up, plugins; plugins on npm and MCP servers in the MCP registry
 <job> is a job's title (any case) or the start of its ID.
 A job runs on one repo: the one the current folder is in (its git remote), or the one --repo names.
-Every change to a job is recorded in its repo's .claude/jobs.json, committed and pushed.`;
+Every change to a job is recorded in its repo's .claude/jobs.json, committed and pushed.
+--agent: Runner (Claude, the default) or Codex (OpenAI's Codex, once connected on /setup).`;
 
 const CONFIG = path.join(os.homedir(), '.config', 'scheduled-jobs', 'paperclip.json');
 const SETUP = path.join(os.homedir(), '.config', 'paperclip-cloudcli', 'setup.json');
@@ -30,7 +33,7 @@ for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a.startsWith('--')) {
     const k = a.slice(2);
-    if (['json', 'paused', 'full', 'help', 'yes'].includes(k)) opts[k] = true;
+    if (['json', 'paused', 'full', 'help', 'yes', 'wait'].includes(k)) opts[k] = true;
     else opts[k] = argv[++i];
   } else pos.push(a);
 }
@@ -43,7 +46,8 @@ try { cfg = JSON.parse(fs.readFileSync(CONFIG, 'utf8')); } catch {
   die(`Not connected to Paperclip: ${CONFIG} is missing. It is written at CloudCLI's start; redeploy CloudCLI, then check its log for "[wiring]".`);
 }
 
-async function api(method, p, body, { allow404 = false } = {}) {
+// soft: an error answer returns null instead of stopping the script.
+async function api(method, p, body, { allow404 = false, soft = false } = {}) {
   const headers = { authorization: `Bearer ${cfg.token}`, accept: 'application/json', origin: cfg.publicUrl || cfg.url };
   if (body !== undefined) headers['content-type'] = 'application/json';
   let res;
@@ -53,7 +57,7 @@ async function api(method, p, body, { allow404 = false } = {}) {
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch {}
-  if (res.status === 404 && allow404) return null;
+  if ((res.status === 404 && allow404) || (!res.ok && soft)) return null;
   if (!res.ok) die(`${method} ${p} -> ${res.status}: ${(json?.error || json?.message || text).toString().slice(0, 400)}`);
   return json;
 }
@@ -77,8 +81,11 @@ async function context(agentName = 'Runner') {
     const agent = agents.find((a) => a.name.toLowerCase() === agentName.toLowerCase() && a.status !== 'terminated');
     if (agent) return { company, agent };
   }
-  die(`No agent named "${agentName}" in Paperclip.`);
+  die(noAgent(agentName));
 }
+const noAgent = (name) => (/^codex$/i.test(String(name))
+  ? `No "Codex" agent in Paperclip yet: the user connects Codex (their ChatGPT account) in the "Optional: Codex" card of ${SETUP_PAGE} (same login), which creates it. Then run this again.`
+  : `No agent named "${name}" in Paperclip (the template's are "Runner", and "Codex" once connected on ${SETUP_PAGE}).`);
 
 // ---- repos: each connected repo has its own Paperclip project, whose primary workspace it is ----
 
@@ -202,6 +209,13 @@ function logText(content) {
       try {
         const e = JSON.parse(l);
         if (e.type === 'result') shown = `[result] ${e.result ?? e.subtype}`;
+        // Codex's `codex exec --json` events: its messages, and the commands it ran.
+        else if (e.item && typeof e.item === 'object') {
+          const it = e.item;
+          shown = ['agent_message', 'reasoning'].includes(it.type) ? String(it.text || `[${it.type}]`)
+            : it.type === 'command_execution' ? `[command] ${it.command}${it.exit_code != null ? ` (exit ${it.exit_code})` : ''}`
+            : `[${it.type || e.type}]`;
+        }
         else if (e.type === 'assistant') shown = arr(e.message?.content).filter((c) => c.type === 'text').map((c) => c.text).join(' ') || `[${arr(e.message?.content).map((c) => c.type === 'tool_use' ? `tool ${c.name}` : c.type).join(', ')}]`;
         else if (e.type) shown = `[${e.type}${e.subtype ? ' ' + e.subtype : ''}]`;
       } catch {}
@@ -246,7 +260,9 @@ async function showLog(job) {
   }
   const agent = job.assigneeAgentId ? await api('GET', `/api/agents/${job.assigneeAgentId}`, undefined, { allow404: true }) : null;
   if (agent && (agent.status === 'paused' || agent.lifecycleError)) {
-    lines.push(`Agent ${agent.name} is ${agent.status}${agent.lifecycleError ? ` (${agent.lifecycleError})` : ''}: its runs wait. A new Claude agent stays paused until Paperclip's check of its Claude sign-in passes; the fix: connect Claude on ${SETUP_PAGE} (same login), which gives Paperclip the token and retries the agent (or sign in to Claude on the agent's configuration page in Paperclip and press Retry).`);
+    lines.push(`Agent ${agent.name} is ${agent.status}${agent.lifecycleError ? ` (${agent.lifecycleError})` : ''}: its runs wait. ${agent.adapterType === 'codex_local'
+      ? `The Codex agent waits until Paperclip's check of its ChatGPT sign-in passes; the fix: connect Codex again in the "Optional: Codex" card of ${SETUP_PAGE} (same login), which signs it in and retries the agent.`
+      : `A new Claude agent stays paused until Paperclip's check of its Claude sign-in passes; the fix: connect Claude on ${SETUP_PAGE} (same login), which gives Paperclip the token and retries the agent (or sign in to Claude on the agent's configuration page in Paperclip and press Retry).`}`);
   }
   if (cfg.publicUrl) lines.push(`Job: ${link(`routines/${job.id}`)}`);
   out(res, lines.join('\n'));
@@ -257,7 +273,7 @@ async function showLog(job) {
 // Paperclip runs the jobs; the record keeps what they are in git, in plain terms another scheduler can read, so they
 // survive this server and can be recreated on a new one (restore).
 const RECORD = '.claude/jobs.json';
-const ABOUT = "Scheduled jobs on this repo, kept by the scheduled-jobs skill (https://github.com/mikedepo/paperclip-cloudcli): every change to a job is a commit of this file. Each job runs its prompt with Claude Code in this repo, on its 5-field cron schedule in its time zone; paused jobs don't run. To recreate them on a new server: node ~/.claude/skills/scheduled-jobs/jobs.mjs restore";
+const ABOUT = "Scheduled jobs on this repo, kept by the scheduled-jobs skill (https://github.com/mikedepo/paperclip-cloudcli): every change to a job is a commit of this file. Each job runs its prompt in this repo with Claude Code (the Runner agent), or with the agent its \"agent\" names (Codex: OpenAI's Codex), on its 5-field cron schedule in its time zone; paused jobs don't run. To recreate them on a new server: node ~/.claude/skills/scheduled-jobs/jobs.mjs restore";
 const git = (dir, ...a) => spawnSync('git', ['-C', dir, ...a], { encoding: 'utf8', timeout: 120000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
 const gitError = (r) => String(r.stderr || r.stdout || r.error?.message || '').trim().split('\n').filter(Boolean).pop() || `exit ${r.status}`;
 const sameJob = (e, job) => (!!e.paperclipId && e.paperclipId === job.id) || String(e.title || '').toLowerCase() === job.title.toLowerCase();
@@ -295,12 +311,16 @@ const withSecrets = (entry, secrets) => {
   return { ...rest, ...(secrets?.length ? { secrets } : {}), paperclipId };
 };
 
-// The job's secrets its agent doesn't have, as a line for the user ('' when none is missing).
+// The job's secrets its agent doesn't have, as a line for the user ('' when none is missing); for a Codex job, also
+// the names Codex won't see: Paperclip keeps variables named *KEY*, *SECRET* or *TOKEN* out of Codex's commands.
 async function missingSecrets(job, secrets) {
   if (!secrets?.length || !job.assigneeAgentId) return '';
   const agent = await api('GET', `/api/agents/${job.assigneeAgentId}`, undefined, { allow404: true });
-  const missing = secrets.filter((n) => !(n in (agent?.adapterConfig?.env || {})));
-  return missing.length ? `"${job.title}" needs ${missing.join(', ')}, which ${agent?.name || 'its agent'} doesn't have yet: the user adds ${missing.length > 1 ? 'them' : 'it'} on ${agent?.name || 'the agent'}'s Secrets & variables page in Paperclip${agent && link('') ? ` (${link(`agents/${agent.id}`)})` : ''}.` : '';
+  const hidden = agent?.adapterType === 'codex_local' ? secrets.filter((n) => /key|secret|token/i.test(n)) : [];
+  const rename = hidden.length ? `Codex never sees ${hidden.join(', ')}: Paperclip keeps variables whose names contain KEY, SECRET or TOKEN out of its commands. Rename ${hidden.length > 1 ? 'them' : 'it'} in the skill and with --secrets, for example TELEGRAM_BOT instead of TELEGRAM_BOT_TOKEN.` : '';
+  const missing = secrets.filter((n) => !(n in (agent?.adapterConfig?.env || {})) && !hidden.includes(n));
+  // Paperclip adds a variable on the agent's Harness / Runtime page; its Secrets & variables page only lists them.
+  return [rename, missing.length ? `"${job.title}" needs ${missing.join(', ')}, which ${agent?.name || 'its agent'} doesn't have yet. The user adds ${missing.length > 1 ? 'each' : 'it'} on ${agent?.name || 'the agent'}'s Harness / Runtime page in Paperclip${agent && link('') ? ` (${link(`agents/${agent.id}/runtime`)})` : ''}: under Environment variables, Add variable, type the name, then choose "Organization secret" and "Create new secret..." for a key or token, or "Text value" for a plain setting such as a chat ID, and Save changes.` : ''].filter(Boolean).join('\n');
 }
 
 // A job as the record keeps it: title, prompt, schedule, status; the agent only when it isn't the Runner.
@@ -426,7 +446,7 @@ switch (cmd) {
     const full = await newJob(project, { title, prompt: opts.prompt, schedules: opts.cron ? [{ cron: opts.cron, timezone: opts.tz }] : [], status: opts.paused ? 'paused' : 'active' });
     const record = await saveRecord(project, `Job "${full.title}" created: ${scheduleText(full)}, ${full.status}${SECRETS?.length ? `, needs ${SECRETS.join(', ')}` : ''}`, put(full, await entryOf(full), { secrets: SECRETS }));
     const lacking = await missingSecrets(full, SECRETS);
-    out({ ...full, repo: repoOf(project), record }, `Created job ${full.id.slice(0, 8)} "${full.title}" for ${ctx.agent.name} in project "${project.name}" (${projectRepos(project).length ? `repo ${repoOf(project)}` : 'no repo yet'}): ${scheduleText(full)}, ${full.status}. Test it: run "${full.title}". ${link(`routines/${full.id}`)}\n${record}${lacking ? `\n${lacking}` : ''}`);
+    out({ ...full, repo: repoOf(project), record }, `Created job ${full.id.slice(0, 8)} "${full.title}" for ${ctx.agent.name} in project "${project.name}" (${projectRepos(project).length ? `repo ${repoOf(project)}` : 'no repo yet'}): ${scheduleText(full)}, ${full.status}. Test it: run "${full.title}" --wait. ${link(`routines/${full.id}`)}\n${record}${lacking ? `\n${lacking}` : ''}`);
     break;
   }
   case 'update': {
@@ -437,12 +457,18 @@ switch (cmd) {
     const moved = opts.repo ? await projectFor(company) : null;
     if (moved?.id === job.projectId) die(`"${job.title}" is already on ${repoOf(moved)}.`);
     if (moved) patch.projectId = moved.id;
+    // --agent hands the job to another agent (Runner or Codex); the record keeps which.
+    const handed = opts.agent ? arr(await api('GET', `/api/companies/${company.id}/agents`))
+      .find((a) => a.name.toLowerCase() === String(opts.agent).toLowerCase() && a.status !== 'terminated') : null;
+    if (opts.agent && !handed) die(noAgent(opts.agent));
+    if (handed && handed.id !== job.assigneeAgentId) patch.assigneeAgentId = handed.id;
     if (Object.keys(patch).length) await api('PATCH', `/api/routines/${job.id}`, patch);
     if (opts.cron || opts.tz) await setSchedule(job, opts.cron, opts.tz);
     const full = await api('GET', `/api/routines/${job.id}`);
     const changes = [
       opts.title && full.title !== job.title ? `renamed from "${job.title}"` : '',
       opts.prompt ? 'new prompt' : '',
+      patch.assigneeAgentId ? `run by ${handed.name}` : '',
       opts.cron || opts.tz ? `schedule ${scheduleText(full)}` : '',
       SECRETS ? (SECRETS.length ? `needs ${SECRETS.join(', ')}` : 'needs no secrets') : '',
     ].filter(Boolean).join(', ');
@@ -456,7 +482,7 @@ switch (cmd) {
       records.push(await saveRecord(await projectById(full.projectId), `Job "${full.title}" changed: ${changes || 'recorded again'}`, put(full, await entryOf(full), { oldTitle: job.title, secrets: SECRETS })));
     }
     const lacking = await missingSecrets(full, SECRETS);
-    out({ ...full, record: records }, `Updated "${full.title}": ${scheduleText(full)}, ${full.status}${moved ? `, repo ${repoOf(moved)}` : ''}\n${records.join('\n')}${lacking ? `\n${lacking}` : ''}`);
+    out({ ...full, record: records }, `Updated "${full.title}": ${scheduleText(full)}, ${full.status}${moved ? `, repo ${repoOf(moved)}` : ''}${handed ? `, run by ${handed.name}` : ''}\n${records.join('\n')}${lacking ? `\n${lacking}` : ''}`);
     break;
   }
   case 'pause':
@@ -508,7 +534,7 @@ switch (cmd) {
         const agent = e.agent ? agents.find((a) => a.name.toLowerCase() === String(e.agent).toLowerCase()) : ctx.agent;
         if (archived) lines.push(`${repoOf(p)}: "${e.title}" was archived in Paperclip's dashboard; skipped. Run sync to drop it from the record.`);
         else if (!e.title || !e.prompt) lines.push(`${repoOf(p)}: an entry without a title or prompt; skipped.`);
-        else if (!agent) lines.push(`${repoOf(p)}: "${e.title}" is for the agent "${e.agent}", which Paperclip doesn't have; skipped.`);
+        else if (!agent) lines.push(`${repoOf(p)}: "${e.title}" is for the agent "${e.agent}", which Paperclip doesn't have; skipped.${/^codex$/i.test(String(e.agent)) ? ` Connect Codex in the "Optional: Codex" card of ${SETUP_PAGE}, then restore again.` : ''}`);
         else todo.push({ e, agent });
       }
       if (!todo.length) { lines.push(`${repoOf(p)}: nothing to recreate (${rec.jobs.length} recorded).`); continue; }
@@ -531,7 +557,25 @@ switch (cmd) {
   case 'run': {
     const job = await findJob(company, args[0]);
     const r = await api('POST', `/api/routines/${job.id}/run`, { source: 'manual' });
-    out(r, `Started "${job.title}": run ${String(r?.id || '').slice(0, 8)} ${r?.status || ''}. Read it with: log "${job.title}"`);
+    if (!opts.wait) {
+      out(r, `Started "${job.title}": run ${String(r?.id || '').slice(0, 8)} ${r?.status || ''}. Read it with: log "${job.title}"`);
+      break;
+    }
+    // Finished: its task is done, blocked or cancelled and no agent run on it is still queued or running (Paperclip
+    // may start a follow-up run to close a task), or the run never got a task (skipped, failed).
+    if (!opts.json) console.log(`Started "${job.title}", waiting for it to finish...`);
+    const until = Date.now() + 9 * 60e3; // under the 10 minutes a Claude Code command may take
+    let finished = false;
+    while (!finished && Date.now() < until) {
+      await new Promise((res) => setTimeout(res, 10000));
+      const run = (await jobRuns(job, 20)).find((x) => x.id === r?.id);
+      if (!run?.linkedIssueId) { finished = !!run && /skip|fail|error|cancel/i.test(run.status || ''); continue; }
+      const task = await api('GET', `/api/issues/${run.linkedIssueId}`);
+      const beats = arr(await api('GET', `/api/issues/${run.linkedIssueId}/runs`));
+      finished = ['done', 'blocked', 'cancelled'].includes(task.status) && !beats.some((b) => ['queued', 'running'].includes(b.status));
+    }
+    if (!finished && !opts.json) console.log(`Still running after 9 minutes; the log so far (read the rest later with: log "${job.title}"):`);
+    await showLog(job);
     break;
   }
   case 'runs': {
@@ -542,6 +586,54 @@ switch (cmd) {
   }
   case 'log': {
     await showLog(await findJob(company, args[0]));
+    break;
+  }
+  case 'connectors': {
+    // What Paperclip already has for an outside service a job needs (connectors.md says how to choose). Read-only.
+    const q = args.join(' ').trim().toLowerCase();
+    const hit = (...xs) => !q || xs.flat().some((x) => String(x || '').toLowerCase().includes(q));
+    const how = (m) => (m.purpose === 'channel' ? 'channel (people reach one agent through it, and it answers there)'
+      : m.purpose === 'ai' ? 'AI model sign-in' : `tools for agents (${m.transport})`);
+    const apps = arr((await api('GET', `/api/companies/${company.id}/tools/gallery`, undefined, { soft: true }))?.apps)
+      .filter((a) => hit(a.slug, a.name, a.description, a.categories) && (q || !(a.methods || []).every((m) => m.purpose === 'ai')));
+    const conns = arr((await api('GET', `/api/companies/${company.id}/tools/connections`, undefined, { soft: true }))?.connections)
+      .filter((c) => hit(c.name, c.uid, c.config?.sourceTemplateKey));
+    const plugins = arr(await api('GET', '/api/plugins', undefined, { soft: true }));
+    const tools = arr(await api('GET', '/api/plugins/tools', undefined, { soft: true }));
+    const lines = [`Paperclip apps${q ? ` for "${q}"` : ''}: ${apps.length || 'none'}`];
+    for (const a of apps) lines.push(`  ${a.name} (${a.slug}): ${[...new Set((a.methods || []).map(how))].join('; ')}. ${a.description || ''}`);
+    lines.push(`Connections set up${q ? ` for "${q}"` : ''}: ${conns.length || 'none'}`);
+    for (const c of conns) lines.push(`  ${c.name} (${c.transport || '?'}, ${c.status || '?'}${c.enabled === false ? ', off' : ''})`);
+    lines.push(`Plugins installed: ${plugins.length || 'none'}`);
+    for (const p of plugins) {
+      const own = tools.filter((t) => t.pluginId === p.id || String(t.name || '').startsWith(`${p.pluginKey}:`));
+      lines.push(`  ${p.manifestJson?.displayName || p.pluginKey || p.packageName} ${p.version || ''} [${p.status}]${own.length ? `, tools: ${own.map((t) => t.name).join(', ')}` : ''}`);
+    }
+    if (cfg.publicUrl) lines.push(`Apps page: ${link('apps')} (your own MCP server: ${link('apps/byo')}). Plugins: ${link('company/settings/instance/plugins')}`);
+    // What others published for the service: Paperclip plugins on npm and servers in the official MCP registry.
+    // Leads, not recommendations: connectors.md says what to check before suggesting one.
+    let npm = null;
+    let mcps = null;
+    if (q) {
+      const get = async (u) => {
+        try { const r = await fetch(u, { signal: AbortSignal.timeout(15000) }); return r.ok ? await r.json() : null; } catch { return null; }
+      };
+      const found = await get(`https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(`paperclip plugin ${q}`)}&size=25`);
+      npm = found && arr(found.objects).map((o) => o.package).filter((p) => /paperclip/i.test(p.name) && hit(p.name, p.description, p.keywords));
+      const reg = await get(`https://registry.modelcontextprotocol.io/v0/servers?search=${encodeURIComponent(q)}&version=latest&limit=10`);
+      mcps = reg && arr(reg.servers).map((s) => s.server).filter(Boolean);
+      const about = (t) => (String(t || '').startsWith('[![') ? '' : String(t || '').slice(0, 120));
+      lines.push(`Paperclip plugins on npm for "${q}": ${npm ? npm.length || 'none' : 'npm did not answer'}`);
+      for (const p of npm || []) lines.push(`  ${p.name} ${p.version} (${String(p.date || '').slice(0, 10)}): ${about(p.description)} ${p.links?.repository || p.links?.npm || ''}`);
+      lines.push(`MCP servers in the MCP registry for "${q}": ${mcps ? mcps.length || 'none' : 'the registry did not answer'}`);
+      for (const s of mcps || []) {
+        const where = s.remotes?.[0]?.url ? `hosted at ${s.remotes[0].url}` : s.packages?.[0] ? `${s.packages[0].registryType} package ${s.packages[0].identifier}` : '';
+        lines.push(`  ${s.name}: ${about(s.title || s.description)}${where ? `, ${where}` : ''} ${s.repository?.url || ''}`);
+      }
+      if (npm?.length || mcps?.length) lines.push('Check one before suggesting it: fit, our Paperclip version, upkeep, and what it can reach (connectors.md).');
+    }
+    if (q && !apps.length && !conns.length && !plugins.length && !npm?.length && !mcps?.length) lines.push(`Nothing for "${q}" yet: weigh an inline call in the skill against a custom connector (connectors.md in this skill).`);
+    out({ apps, connections: conns, plugins, tools, npm, mcpRegistry: mcps }, lines.join('\n'));
     break;
   }
   default:

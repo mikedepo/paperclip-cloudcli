@@ -9,6 +9,8 @@
 //   3. Repos: adds a repo (never replaces one): clones it into the home folder and gives it its own project in
 //      Paperclip, whose primary workspace it is, so each repo's jobs run on that repo.
 //   4. Time zone: from the browser; used by the scheduled-jobs script and terminals here.
+//   Optional, Codex: Paperclip's own ChatGPT sign-in (device code) for a "Codex" agent that runs the jobs given to it,
+//      and, separately, `codex login --device-auth` for Codex in CloudCLI.
 // - Until setup is done or skipped, opening CloudCLI's home page redirects to /setup.
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -17,9 +19,9 @@ import { createRequire } from 'node:module';
 import net from 'node:net';
 import path from 'node:path';
 import {
-  APP, CONFIG, H, addProject, bindRunnerSecrets, claudeSignedIn, cloneRepo, cloudcliUrl, paperclipPublicUrl, pc,
-  readJson, readSetup, repoInfo, repoProject, runnerContext, sameRepo, saveClaudeToken, timezone, updateSetup, upsertSecret,
-  validZone, wireMemory, writeLayer, writePrivateJson, writeShellZone,
+  APP, CONFIG, H, addProject, bindRunnerSecrets, claudeSignedIn, cloneRepo, cloudcliUrl, codexIntent, codexSignedIn,
+  connectCodexAgent, paperclipPublicUrl, pc, readJson, readSetup, repoInfo, repoProject, runnerContext, sameRepo,
+  saveClaudeToken, timezone, updateSetup, upsertSecret, validZone, wireMemory, writeLayer, writePrivateJson, writeShellZone,
 } from './layer.mjs';
 
 const PORT = Number(process.env.FRONT_PORT || 3001);
@@ -205,6 +207,94 @@ function repoList() {
   });
 }
 
+// ---------- optional: Codex, for Paperclip's jobs (Paperclip's own ChatGPT sign-in) and for CloudCLI ----------
+
+const DEVICE_HINT = 'If ChatGPT said device code sign-in is off: in ChatGPT, Settings, Security and login, turn on "Enable device code sign-in for Codex" (near the bottom), then press Start again.';
+let codex = null; // Paperclip's sign-in: { status, url, code, error }
+
+// Paperclip runs `codex login --device-auth` on its own server and keeps the credential (encrypted, refreshed) as its
+// AI connection; this only relays the link and one-time code it reports, then gives the "Codex" agent the connection.
+function codexStart() {
+  if (codex && ['starting', 'waiting-user', 'saving'].includes(codex.status)) return;
+  const job = { status: 'starting', url: null, code: null, error: null };
+  codex = job;
+  codexSignIn(job).catch((e) => {
+    job.status = 'error';
+    job.error = `Codex isn't connected: ${e.message}`;
+    say(job.error);
+  });
+}
+
+async function codexSignIn(job) {
+  const { company } = await runnerContext();
+  const intent = await codexIntent(company);
+  const base = `/api/companies/${company.id}/ai-connections/local`;
+  const { sessionId } = await pc('POST', `${base}/attempts`, { ...intent, restart: true });
+  const until = Date.now() + 10 * 60e3;
+  for (;;) {
+    const s = await pc('POST', `${base}/check`, { ...intent, localSessionId: sessionId });
+    if (s?.status === 'ready') break;
+    if (s?.status === 'expired') throw new Error('the sign-in expired. Press Start again.');
+    if (s?.error) throw new Error(`${s.error} ${DEVICE_HINT}`);
+    if (s?.authorizationUrl) job.url = s.authorizationUrl;
+    if (s?.code) job.code = s.code;
+    if (job.url && job.code) job.status = 'waiting-user';
+    if (Date.now() > until) {
+      await pc('DELETE', `${base}/attempts/${sessionId}`).catch(() => {});
+      throw new Error('ChatGPT confirmed nothing within 10 minutes. Press Start again.');
+    }
+    await sleep(2000);
+  }
+  job.status = 'saving';
+  const saved = await pc('POST', base, { ...intent, localSessionId: sessionId });
+  const { how } = await connectCodexAgent(saved);
+  updateSetup({ codex: { done: true, at: new Date().toISOString() } });
+  writeLayer();
+  job.status = 'done';
+  say(`Codex connected for Paperclip's jobs (agent "Codex" ${how})`);
+}
+
+// Codex in CloudCLI's chats and terminal: its own sign-in, here (a second one-time code). The same credential can't
+// serve both: Codex's refresh tokens are single-use, so two copies would sign each other out.
+let codexHere = null; // { status, url, code, error, pty, out }
+function codexHereStart() {
+  if (codexHere && ['starting', 'waiting-user'].includes(codexHere.status)) return;
+  const pty = createRequire(path.join(APP, 'package.json'))('node-pty');
+  const own = path.join(H, '.npm-global', 'bin', 'codex');
+  const env = childEnv({ BROWSER: 'true' });
+  for (const k of ['OPENAI_API_KEY', 'CODEX_API_KEY']) delete env[k];
+  const job = { status: 'starting', url: null, code: null, error: null, out: '' };
+  job.pty = pty.spawn(fs.existsSync(own) ? own : 'codex', ['login', '--device-auth'], { name: 'xterm-256color', cols: 400, rows: 50, cwd: H, env });
+  job.pty.onData((d) => {
+    job.out = (job.out + d).slice(-50000);
+    if (job.code) return;
+    const text = strip(job.out);
+    const url = text.match(/https:\/\/auth\.openai\.com\/[^\s"'<>]*/);
+    const at = text.search(/one-time code/i); // the code is printed after this line
+    const code = at >= 0 && text.slice(at).match(/\b([A-Z0-9]{4}-[A-Z0-9]{5})\b/);
+    if (url) job.url = url[0];
+    if (code) { job.code = code[1]; job.status = 'waiting-user'; }
+  });
+  job.pty.onExit(({ exitCode }) => {
+    if (exitCode === 0 && codexSignedIn()) {
+      job.status = 'done';
+      updateSetup({ codexCloudcli: { done: true, at: new Date().toISOString() } });
+      say('Codex signed in for CloudCLI');
+    } else if (!['done', 'error'].includes(job.status)) {
+      job.status = 'error';
+      job.error = `codex login ended (exit ${exitCode}) without signing in: ${strip(job.out).trim().split('\n').filter(Boolean).slice(-2).join(' ').slice(0, 300)}. ${DEVICE_HINT}`;
+    }
+    job.out = '';
+  });
+  setTimeout(() => {
+    if (job.status === 'starting') { job.status = 'error'; job.error = 'codex login printed no code within 60 seconds'; try { job.pty.kill(); } catch {} }
+  }, 60000);
+  setTimeout(() => {
+    if (job.status === 'waiting-user') { job.status = 'error'; job.error = 'ChatGPT confirmed nothing within 15 minutes. Press the button again.'; try { job.pty.kill(); } catch {} }
+  }, 15 * 60e3);
+  codexHere = job;
+}
+
 // ---------- step 4: time zone ----------
 
 function saveZone(zone) {
@@ -248,6 +338,14 @@ function state() {
     github: { done: !!s.github?.done, user: s.github?.user || null, status: github?.status || null, code: github?.status === 'waiting-user' ? github.code : null, url: github?.url || null, error: github?.error || null },
     repos: repoList(),
     timezone: { value: timezone(), chosen: !!s.timezone },
+    codex: {
+      done: !!s.codex?.done, status: codex?.status || null, error: codex?.error || null,
+      url: codex?.status === 'waiting-user' ? codex.url : null, code: codex?.status === 'waiting-user' ? codex.code : null,
+      here: {
+        done: codexSignedIn(), status: codexHere?.status || null, error: codexHere?.error || null,
+        url: codexHere?.status === 'waiting-user' ? codexHere.url : null, code: codexHere?.status === 'waiting-user' ? codexHere.code : null,
+      },
+    },
     paperclipConnected: !!cfg.token,
     links: { cloudcli: cloudcliUrl || '/', paperclip: paperclipPublicUrl },
     done: !!s.done,
@@ -272,6 +370,8 @@ async function api(req, res, route) {
     if (route === 'github/repos') return send(res, 200, { repos: githubRepos() });
     if (route === 'repo') return send(res, 200, { ...(await pickRepo(b.repo)), state: state() });
     if (route === 'timezone') { saveZone(b.timezone); return send(res, 200, state()); }
+    if (route === 'codex/start') { codexStart(); for (let i = 0; i < 40 && codex.status === 'starting'; i++) await sleep(500); return send(res, 200, state()); }
+    if (route === 'codex/here') { codexHereStart(); for (let i = 0; i < 30 && codexHere.status === 'starting'; i++) await sleep(500); return send(res, 200, state()); }
     if (route === 'finish') { updateSetup({ done: true }); return send(res, 200, state()); }
     if (route === 'skip') { updateSetup({ skipped: true }); return send(res, 200, state()); }
     return send(res, 404, { error: 'unknown step' });

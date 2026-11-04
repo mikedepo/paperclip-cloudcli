@@ -95,8 +95,9 @@ await connect();
 
 // Installs from before the Runner's bindings covered GitHub get them here, with no step to redo.
 try {
-  const { bound } = await bindRunnerSecrets();
+  const { bound, codexBound } = await bindRunnerSecrets();
   if (bound.length) log(`bound ${bound.join(', ')} on Paperclip's Runner (from its company secrets)`);
+  if (codexBound.length) log(`bound ${codexBound.join(', ')} on Paperclip's Codex agent (from its company secrets)`);
 } catch (e) {
   log(`checking the Runner's secrets failed (${e.message}); retried at the next start`);
 }

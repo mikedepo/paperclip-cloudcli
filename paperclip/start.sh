@@ -12,6 +12,18 @@ echo "[paperclip-cloudcli] What changed: https://github.com/mikedepo/paperclip-c
 # (CloudCLI binds it; Paperclip itself uses that secret only for its own checkouts).
 git config --system credential.https://github.com.helper '!gh auth git-credential'
 
+# Paperclip keeps every variable named *KEY*, *SECRET* or *TOKEN* out of the Codex agent's commands, so that agent
+# also gets the GitHub token as GH_PAT (the owner's choice, 2026-11-04). This wrapper, ahead of the image's
+# /usr/bin/gh on PATH, uses it when no GitHub token is set; git reaches GitHub through gh (above), so both work.
+if [ -x /usr/bin/gh ]; then
+  cat > /usr/local/bin/gh <<'EOF'
+#!/bin/sh
+if [ -z "$GH_TOKEN$GITHUB_TOKEN" ] && [ -n "$GH_PAT" ]; then export GH_TOKEN="$GH_PAT"; fi
+exec /usr/bin/gh "$@"
+EOF
+  chmod 755 /usr/local/bin/gh
+fi
+
 # Commits work out of the box: the admin email as git's identity, machine-wide, so every run has it whatever its
 # HOME. A ~/.gitconfig identity, set later by the user, wins.
 if [ -n "$ADMIN_EMAIL" ]; then
