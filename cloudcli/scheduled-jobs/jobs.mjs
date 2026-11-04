@@ -18,6 +18,7 @@ const USAGE = `node jobs.mjs <command> [options]   (--json for raw output)
   log <job> [--run N] [--full]              a run's task status, summary, tokens and cost, and its log (default: the latest run)
   sync [--repo <name>]                      record every job in its repo's .claude/jobs.json (after changes made in Paperclip's dashboard)
   restore [--repo <name>] [--yes]           recreate the jobs the repos' .claude/jobs.json list that Paperclip doesn't have (a new server); without --yes, only shows them
+  connectors [<service>]                    what exists for an outside service (telegram, slack, email...): Paperclip's apps, the connections set up, plugins; plugins on npm and MCP servers in the MCP registry
 <job> is a job's title (any case) or the start of its ID.
 A job runs on one repo: the one the current folder is in (its git remote), or the one --repo names.
 Every change to a job is recorded in its repo's .claude/jobs.json, committed and pushed.
@@ -45,7 +46,8 @@ try { cfg = JSON.parse(fs.readFileSync(CONFIG, 'utf8')); } catch {
   die(`Not connected to Paperclip: ${CONFIG} is missing. It is written at CloudCLI's start; redeploy CloudCLI, then check its log for "[wiring]".`);
 }
 
-async function api(method, p, body, { allow404 = false } = {}) {
+// soft: an error answer returns null instead of stopping the script.
+async function api(method, p, body, { allow404 = false, soft = false } = {}) {
   const headers = { authorization: `Bearer ${cfg.token}`, accept: 'application/json', origin: cfg.publicUrl || cfg.url };
   if (body !== undefined) headers['content-type'] = 'application/json';
   let res;
@@ -55,7 +57,7 @@ async function api(method, p, body, { allow404 = false } = {}) {
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch {}
-  if (res.status === 404 && allow404) return null;
+  if ((res.status === 404 && allow404) || (!res.ok && soft)) return null;
   if (!res.ok) die(`${method} ${p} -> ${res.status}: ${(json?.error || json?.message || text).toString().slice(0, 400)}`);
   return json;
 }
@@ -562,6 +564,54 @@ switch (cmd) {
   }
   case 'log': {
     await showLog(await findJob(company, args[0]));
+    break;
+  }
+  case 'connectors': {
+    // What Paperclip already has for an outside service a job needs (connectors.md says how to choose). Read-only.
+    const q = args.join(' ').trim().toLowerCase();
+    const hit = (...xs) => !q || xs.flat().some((x) => String(x || '').toLowerCase().includes(q));
+    const how = (m) => (m.purpose === 'channel' ? 'channel (people reach one agent through it, and it answers there)'
+      : m.purpose === 'ai' ? 'AI model sign-in' : `tools for agents (${m.transport})`);
+    const apps = arr((await api('GET', `/api/companies/${company.id}/tools/gallery`, undefined, { soft: true }))?.apps)
+      .filter((a) => hit(a.slug, a.name, a.description, a.categories) && (q || !(a.methods || []).every((m) => m.purpose === 'ai')));
+    const conns = arr((await api('GET', `/api/companies/${company.id}/tools/connections`, undefined, { soft: true }))?.connections)
+      .filter((c) => hit(c.name, c.uid, c.config?.sourceTemplateKey));
+    const plugins = arr(await api('GET', '/api/plugins', undefined, { soft: true }));
+    const tools = arr(await api('GET', '/api/plugins/tools', undefined, { soft: true }));
+    const lines = [`Paperclip apps${q ? ` for "${q}"` : ''}: ${apps.length || 'none'}`];
+    for (const a of apps) lines.push(`  ${a.name} (${a.slug}): ${[...new Set((a.methods || []).map(how))].join('; ')}. ${a.description || ''}`);
+    lines.push(`Connections set up${q ? ` for "${q}"` : ''}: ${conns.length || 'none'}`);
+    for (const c of conns) lines.push(`  ${c.name} (${c.transport || '?'}, ${c.status || '?'}${c.enabled === false ? ', off' : ''})`);
+    lines.push(`Plugins installed: ${plugins.length || 'none'}`);
+    for (const p of plugins) {
+      const own = tools.filter((t) => t.pluginId === p.id || String(t.name || '').startsWith(`${p.pluginKey}:`));
+      lines.push(`  ${p.manifestJson?.displayName || p.pluginKey || p.packageName} ${p.version || ''} [${p.status}]${own.length ? `, tools: ${own.map((t) => t.name).join(', ')}` : ''}`);
+    }
+    if (cfg.publicUrl) lines.push(`Apps page: ${link('apps')} (your own MCP server: ${link('apps/byo')}). Plugins: ${link('company/settings/instance/plugins')}`);
+    // What others published for the service: Paperclip plugins on npm and servers in the official MCP registry.
+    // Leads, not recommendations: connectors.md says what to check before suggesting one.
+    let npm = null;
+    let mcps = null;
+    if (q) {
+      const get = async (u) => {
+        try { const r = await fetch(u, { signal: AbortSignal.timeout(15000) }); return r.ok ? await r.json() : null; } catch { return null; }
+      };
+      const found = await get(`https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(`paperclip plugin ${q}`)}&size=25`);
+      npm = found && arr(found.objects).map((o) => o.package).filter((p) => /paperclip/i.test(p.name) && hit(p.name, p.description, p.keywords));
+      const reg = await get(`https://registry.modelcontextprotocol.io/v0/servers?search=${encodeURIComponent(q)}&version=latest&limit=10`);
+      mcps = reg && arr(reg.servers).map((s) => s.server).filter(Boolean);
+      const about = (t) => (String(t || '').startsWith('[![') ? '' : String(t || '').slice(0, 120));
+      lines.push(`Paperclip plugins on npm for "${q}": ${npm ? npm.length || 'none' : 'npm did not answer'}`);
+      for (const p of npm || []) lines.push(`  ${p.name} ${p.version} (${String(p.date || '').slice(0, 10)}): ${about(p.description)} ${p.links?.repository || p.links?.npm || ''}`);
+      lines.push(`MCP servers in the MCP registry for "${q}": ${mcps ? mcps.length || 'none' : 'the registry did not answer'}`);
+      for (const s of mcps || []) {
+        const where = s.remotes?.[0]?.url ? `hosted at ${s.remotes[0].url}` : s.packages?.[0] ? `${s.packages[0].registryType} package ${s.packages[0].identifier}` : '';
+        lines.push(`  ${s.name}: ${about(s.title || s.description)}${where ? `, ${where}` : ''} ${s.repository?.url || ''}`);
+      }
+      if (npm?.length || mcps?.length) lines.push('Check one before suggesting it: fit, our Paperclip version, upkeep, and what it can reach (connectors.md).');
+    }
+    if (q && !apps.length && !conns.length && !plugins.length && !npm?.length && !mcps?.length) lines.push(`Nothing for "${q}" yet: weigh an inline call in the skill against a custom connector (connectors.md in this skill).`);
+    out({ apps, connections: conns, plugins, tools, npm, mcpRegistry: mcps }, lines.join('\n'));
     break;
   }
   default:
