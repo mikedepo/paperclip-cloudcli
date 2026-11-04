@@ -209,7 +209,7 @@ function repoList() {
 
 // ---------- optional: Codex, for Paperclip's jobs (Paperclip's own ChatGPT sign-in) and for CloudCLI ----------
 
-const DEVICE_HINT = "If ChatGPT said device code sign-in is off, turn it on for Codex in ChatGPT's Security settings, then press Start again.";
+const DEVICE_HINT = 'If ChatGPT said device code sign-in is off: in ChatGPT, Settings, Security and login, turn on "Enable device code sign-in for Codex" (near the bottom), then press Start again.';
 let codex = null; // Paperclip's sign-in: { status, url, code, error }
 
 // Paperclip runs `codex login --device-auth` on its own server and keeps the credential (encrypted, refreshed) as its
