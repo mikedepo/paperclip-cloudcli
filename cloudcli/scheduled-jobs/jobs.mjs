@@ -460,7 +460,7 @@ switch (cmd) {
     const full = await newJob(project, { title, prompt: opts.prompt, schedules: opts.cron ? [{ cron: opts.cron, timezone: opts.tz }] : [], status: opts.paused ? 'paused' : 'active' });
     const record = await saveRecord(project, `Job "${full.title}" created: ${scheduleText(full)}, ${full.status}${SECRETS?.length ? `, needs ${SECRETS.join(', ')}` : ''}`, put(full, await entryOf(full), { secrets: SECRETS }));
     const lacking = await missingSecrets(full, SECRETS);
-    const why = ctx.fallback ? `\nIt runs with Codex: Claude isn't connected for Paperclip's Runner. Once it is, the job can move with: update "${full.title}" --agent Runner` : '';
+    const why = ctx.fallback ? `\nIt runs with Codex: Paperclip's Runner (Claude) can't run jobs now (Claude isn't connected for it, or it is paused). Once it can, the job moves with: update "${full.title}" --agent Runner` : '';
     out({ ...full, repo: repoOf(project), record }, `Created job ${full.id.slice(0, 8)} "${full.title}" for ${ctx.agent.name} in project "${project.name}" (${projectRepos(project).length ? `repo ${repoOf(project)}` : 'no repo yet'}): ${scheduleText(full)}, ${full.status}. Test it: run "${full.title}" --wait. ${link(`routines/${full.id}`)}${why}\n${record}${lacking ? `\n${lacking}` : ''}`);
     break;
   }

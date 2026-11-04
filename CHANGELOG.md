@@ -2,6 +2,13 @@
 
 Each entry is an update Railway offers to existing deployments of the template. Updates are opt-in: nothing changes until you apply one, and your data is kept (see the README).
 
+## 2026-11-04 (2)
+
+- Claude, Codex, or both: use OpenAI's Codex on your ChatGPT plan instead of Claude, or alongside it, for the chat that creates jobs and for the agent that runs them. Step 1 of the setup page is now "Claude, Codex, or both", and either one finishes setup. Codex takes two one-time codes in a row, one for Paperclip's Codex agent and one for CloudCLI's chats, since one ChatGPT sign-in can't serve both. Codex chats need ChatGPT Plus or higher; Codex jobs also run on a free plan.
+- Codex chats in CloudCLI know the server as Claude does: the template writes the same instructions to `~/.codex/AGENTS.md` and links the scheduled-jobs skill where Codex finds it, so Codex can create, change, test and record jobs.
+- New jobs go to the Runner (Claude) when Claude is connected, and to Codex when only Codex is. With both, ask for Codex to use it, as before.
+- Codex chats need CloudCLI's Bypass Permissions mode: Codex's sandbox can't start on Railway, so in the other modes every command fails with "bwrap: Creating new namespace failed". The setup page selects Bypass Permissions for Codex in your browser. In that mode Codex doesn't ask before running a command; it is told to ask you in the chat before anything destructive. Claude chats are unchanged.
+
 ## 2026-11-04
 
 - Jobs can run with OpenAI's Codex instead of Claude, on your ChatGPT plan. It is optional: the setup page's new "Optional: Codex" card signs Codex in on your server with a one-time code (first turn on "Enable device code sign-in for Codex" in ChatGPT, Settings, Security and login) and adds a "Codex" agent in Paperclip. Then ask Claude to run a job with Codex. Claude's Runner stays the default, and your Runner and jobs are unchanged. Codex jobs reach GitHub as the Runner's do. A Codex job's own keys are named without KEY, SECRET or TOKEN, because Paperclip keeps such variables out of Codex's commands; Claude names them that way, and the jobs script warns otherwise.
