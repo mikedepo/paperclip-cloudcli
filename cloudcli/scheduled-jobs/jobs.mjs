@@ -534,6 +534,9 @@ switch (cmd) {
   case 'restore': {
     const lines = [];
     const agents = arr(await api('GET', `/api/companies/${company.id}/agents`)).filter((a) => a.status !== 'terminated');
+    // A job the record keeps for the Runner (no agent named) goes to Codex when only Codex is connected, as create does.
+    const { agent: usual, fallback } = await context();
+    if (fallback) lines.push(`Claude isn't connected for Paperclip, so jobs recorded for the Runner go to ${usual.name}.`);
     for (const p of await reposToCheck()) {
       const dir = cloneOf(p);
       if (!dir) { lines.push(`${repoOf(p)}: no clone on this server.`); continue; }
@@ -546,7 +549,7 @@ switch (cmd) {
       const todo = [];
       for (const e of rec.jobs.filter((x) => !live.some((j) => sameJob(x, j)))) {
         const archived = all.find((j) => j.status === 'archived' && j.id === e.paperclipId);
-        const agent = e.agent ? agents.find((a) => a.name.toLowerCase() === String(e.agent).toLowerCase()) : ctx.agent;
+        const agent = e.agent ? agents.find((a) => a.name.toLowerCase() === String(e.agent).toLowerCase()) : usual;
         if (archived) lines.push(`${repoOf(p)}: "${e.title}" was archived in Paperclip's dashboard; skipped. Run sync to drop it from the record.`);
         else if (!e.title || !e.prompt) lines.push(`${repoOf(p)}: an entry without a title or prompt; skipped.`);
         else if (!agent) lines.push(`${repoOf(p)}: "${e.title}" is for the agent "${e.agent}", which Paperclip doesn't have; skipped.${/^codex$/i.test(String(e.agent)) ? ` Connect Codex in step 1 of ${SETUP_PAGE}, then restore again.` : ''}`);
