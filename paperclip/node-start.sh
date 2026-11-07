@@ -15,4 +15,6 @@ node "$B/admin-setup.mjs"
 
 # Agents inherit Paperclip's environment: they don't need the admin login.
 unset ADMIN_EMAIL ADMIN_PASSWORD
+# The image's own start (Paperclip 2026.1106 boots from a precompiled bundle; older images had only the tsx build).
+if [ -f server/dist-runtime/index.mjs ]; then exec node server/dist-runtime/index.mjs; fi
 exec node --import ./server/node_modules/tsx/dist/loader.mjs server/dist/index.js

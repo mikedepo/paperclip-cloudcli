@@ -3,12 +3,15 @@
 // (Claude), or by the optional "Codex" agent for the jobs given to it.
 // Talks to Paperclip's REST API over Railway's private network with the board API key the template stored in
 // ~/.config/scheduled-jobs/paperclip.json. Part of AvgSoft's Paperclip + CloudCLI template; rewritten at every start.
+// The same script runs on Paperclip's server for the "Scheduler" agent (assistants connected through Paperclip's MCP
+// server give it the commands), with SCHEDULED_JOBS_CONFIG naming its key; there, CloudCLI's watch records the jobs.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 const USAGE = `node jobs.mjs <command> [options]   (--json for raw output)
+  repos                                     the connected repos: a job runs a skill from one of them
   list                                      every job: status, repo, schedule, next and last run
   create "<title>" --prompt "<prompt>" [--cron "<min hour dom mon dow>"] [--tz <IANA zone, default: the server's TZ>] [--paused] [--agent <name>] [--repo <name or owner/name>] [--secrets "NAME,NAME"]
   update <job> [--title ...] [--prompt ...] [--cron ...] [--tz ...] [--repo ...] [--agent ...] [--secrets ...]   (--secrets "" clears them)
@@ -18,13 +21,14 @@ const USAGE = `node jobs.mjs <command> [options]   (--json for raw output)
   log <job> [--run N] [--full]              a run's task status, summary, tokens and cost, and its log (default: the latest run)
   sync [--repo <name>]                      record every job in its repo's .claude/jobs.json (after changes made in Paperclip's dashboard)
   restore [--repo <name>] [--yes]           recreate the jobs the repos' .claude/jobs.json list that Paperclip doesn't have (a new server); without --yes, only shows them
+  watch                                     run by the server every 5 minutes: no overlap and no backlog on jobs made outside this script, and every job recorded in its repo
   connectors [<service>]                    what exists for an outside service (telegram, slack, email...): Paperclip's apps, the connections set up, plugins; plugins on npm and MCP servers in the MCP registry
 <job> is a job's title (any case) or the start of its ID.
 A job runs on one repo: the one the current folder is in (its git remote), or the one --repo names.
 Every change to a job is recorded in its repo's .claude/jobs.json, committed and pushed.
 --agent: Runner (Claude, the default) or Codex (OpenAI's Codex, once connected on /setup).`;
 
-const CONFIG = path.join(os.homedir(), '.config', 'scheduled-jobs', 'paperclip.json');
+const CONFIG = process.env.SCHEDULED_JOBS_CONFIG || path.join(os.homedir(), '.config', 'scheduled-jobs', 'paperclip.json');
 const SETUP = path.join(os.homedir(), '.config', 'paperclip-cloudcli', 'setup.json');
 const argv = process.argv.slice(2);
 const opts = {};
@@ -40,6 +44,7 @@ for (let i = 0; i < argv.length; i++) {
 const [cmd, ...args] = pos;
 const die = (m) => { console.error(m); process.exit(1); };
 if (!cmd || opts.help) { console.log(USAGE); process.exit(cmd ? 0 : 1); }
+if (cmd === 'watch' && !fs.existsSync(CONFIG)) process.exit(0); // not connected yet: the next round tries again
 
 let cfg;
 try { cfg = JSON.parse(fs.readFileSync(CONFIG, 'utf8')); } catch {
@@ -89,7 +94,8 @@ const noAgent = (name) => (/^codex$/i.test(String(name))
 
 // ---- repos: each connected repo has its own Paperclip project, whose primary workspace it is ----
 
-const SETUP_PAGE = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/setup` : "CloudCLI's /setup page";
+// On Paperclip's server (the Scheduler agent, cfg.recordedBy) the public domain is Paperclip's, not CloudCLI's.
+const SETUP_PAGE = process.env.RAILWAY_PUBLIC_DOMAIN && !cfg.recordedBy ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/setup` : "CloudCLI's /setup page";
 // "host/owner/name" in lower case from an https or ssh git address ('' otherwise); GitHub names ignore case.
 function repoKey(raw) {
   raw = String(raw || '').trim();
@@ -196,14 +202,59 @@ async function jobRuns(job, limit) {
   return arr(await api('GET', `/api/routines/${job.id}/runs?limit=${limit}`));
 }
 
+// One line of text, at most n characters.
+const oneLine = (t, n = 240) => { const x = String(t ?? '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n - 1)}…` : x; };
+
+// Paperclip's native runner (2026.1106) logs its run as paperclip.prp.event records: the assistant's text arrives in
+// pieces (item.delta), each tool call as started/progressed/completed. Returns readable lines for one event, keeping
+// what it needs between events in `st` (the text so far, the command of each tool call).
+function nativeEvent(ev, st) {
+  const p = ev?.payload || {};
+  const flush = () => {
+    const out = [...st.text.values()].map((t) => oneLine(t, 400)).filter(Boolean).map((t) => t);
+    st.text.clear();
+    return out;
+  };
+  switch (ev?.eventType) {
+    case 'session.started': return [`[session] ${p.context?.model || ''} in ${p.context?.workingDirectory || '?'}`];
+    case 'item.delta':
+      if (p.kind === 'agentMessage') { const id = p.update?.itemId || 'text'; st.text.set(id, (st.text.get(id) || '') + (p.text || '')); }
+      return [];
+    case 'tool.execution.progressed':
+      if (p.progress && !/\(pending\)$/.test(p.progress)) st.cmd.set(p.executionId, p.progress);
+      return [];
+    case 'tool.execution.started': return flush();
+    case 'tool.execution.completed': {
+      const what = st.cmd.get(p.executionId) || '';
+      const shown = p.name === 'Terminal' ? `$ ${oneLine(what.split(': ').slice(1).join(': ') || what, 200)}` : `${p.name}${what && !what.includes(p.name) ? ` ${oneLine(what, 160)}` : ''}`;
+      let output = String(p.output ?? '');
+      try { const j = JSON.parse(output); if (Array.isArray(j) && j.length && j.every((c) => c?.type === 'text')) output = j.map((c) => c.text).join(' '); } catch {}
+      return [`[tool] ${shown}`, `  -> ${oneLine(output, 200) || '(no output)'}${p.exitCode ? ` (exit ${p.exitCode})` : ''}`];
+    }
+    case 'item.completed':
+      if (p.kind === 'agentMessage' && p.providerPhase === 'final_answer') { st.text.clear(); return [`[result] ${oneLine(p.text, 600)}`]; }
+      return [];
+    case 'turn.completed': return [...flush(), ...(p.error ? [`[error] ${oneLine(typeof p.error === 'string' ? p.error : JSON.stringify(p.error), 300)}`] : [])];
+    case 'run.terminal': return [`[done] run ${p.runTerminalState || '?'}${p.reportedWorkDisposition ? `, task ${p.reportedWorkDisposition}` : ''}`];
+    default:
+      return /error|fail/i.test(ev?.eventType || '') ? [`[${ev.eventType}] ${oneLine(JSON.stringify(p), 240)}`] : [];
+  }
+}
+
 function logText(content) {
   const lines = [];
+  const native = { text: new Map(), cmd: new Map() };
   for (const raw of String(content || '').split('\n')) {
     if (!raw.trim()) continue;
     let chunk = raw, stream = 'stdout';
     try { const j = JSON.parse(raw); if (typeof j.chunk === 'string') { chunk = j.chunk; stream = j.stream || stream; } } catch {}
     for (const l of chunk.split('\n')) {
       if (!l.trim()) continue;
+      // The native runner's own diagnostics: only problems are shown.
+      if (stream === 'stderr' && l.startsWith('[paperclip-runner]') && !/error|fail|denied|refused|timed out/i.test(l)) continue;
+      if (l.startsWith('{"type":"paperclip.prp.event"')) {
+        try { lines.push(...nativeEvent(JSON.parse(l).event, native).map((t) => (t.startsWith('[') || t.startsWith('  ') ? t : `[assistant] ${t}`))); continue; } catch {}
+      }
       // Claude Code's stream-json: show the text parts, not the event envelopes.
       let shown = l;
       try {
@@ -301,6 +352,7 @@ async function agentName(id) {
 // not the job, so the record is where a job's list is kept; a new server learns from it what to set up.
 const SECRETS = (() => {
   if (opts.secrets === undefined) return undefined;
+  if (cfg.recordedBy) die(`Secret names live only in the repo's ${RECORD}: add "secrets": ["NAME", ...] to the job's entry there, then commit and push (the server keeps them). Their values go on the agent's Harness / Runtime page in Paperclip.`);
   const names = String(opts.secrets).split(/[\s,]+/).filter(Boolean);
   const bad = names.filter((n) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(n));
   if (bad.length) die(`--secrets takes variable names (letters, digits, _), not values: ${bad.join(', ')}`);
@@ -355,8 +407,29 @@ async function projectJobs(project, archived = false) {
 async function saveRecord(project, message, edit) {
   if (!project) return 'Not recorded: the job has no repo.';
   const where = `${repoOf(project)}'s ${RECORD}`;
+  // On Paperclip's server (the Scheduler agent) there is no clone: CloudCLI's watch records the change.
+  if (cfg.recordedBy) return `${where} gets this change within 5 minutes (the server records every job).`;
   const dir = cloneOf(project);
   if (!dir) return `Not recorded: ${repoOf(project)} has no clone on this server (add it on step 3 of ${SETUP_PAGE}).`;
+  return (await withLock(dir, () => writeRecord(project, dir, where, message, edit)))
+    ?? `Not recorded: another change to ${where} was still being written. Run: sync`;
+}
+
+// One writer per clone at a time: this script run by hand and the server's watch both write the record.
+async function withLock(dir, fn) {
+  const lock = path.join(dir, '.git', 'scheduled-jobs.lock');
+  for (let i = 0; ; i++) {
+    try { fs.mkdirSync(lock); break; } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      try { if (Date.now() - fs.statSync(lock).mtimeMs > 5 * 60e3) { fs.rmdirSync(lock); continue; } } catch {}
+      if (i >= 90) return null;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  try { return await fn(); } finally { try { fs.rmdirSync(lock); } catch {} }
+}
+
+async function writeRecord(project, dir, where, message, edit) {
   git(dir, 'pull', '--ff-only', '--quiet'); // best effort: change the latest pushed record
   const rec = readRecord(dir);
   if (rec.error) return `Not recorded: ${rec.error}. Fix or delete the file, then run: sync`;
@@ -407,6 +480,13 @@ const { company } = ctx;
 PREFIX = company.issuePrefix || '';
 
 switch (cmd) {
+  case 'repos': {
+    const connected = (await projects(company)).filter((p) => projectRepos(p).length);
+    const rows = connected.map((p) => `${repoOf(p)}  ${projectRepos(p)[0].repoUrl}  (project "${p.name}")`);
+    out(connected.map((p) => ({ repo: repoOf(p), url: projectRepos(p)[0].repoUrl, project: p.name, projectId: p.id })),
+      `${rows.length ? `Connected repos (a job runs a skill from one of them):\n${rows.join('\n')}` : 'No repo is connected yet, so no job can be made.'}\nAnother repo is connected on step 3 of ${SETUP_PAGE}.`);
+    break;
+  }
   case 'list': {
     const jobs = await routines(company);
     const byId = new Map((await projects(company, true)).map((p) => [p.id, p]));
@@ -552,6 +632,82 @@ switch (cmd) {
       lines.push(await saveRecord(p, `Jobs recreated in Paperclip: ${made.map((j) => `"${j.title}"`).join(', ')}`, (jobs) => made.reduce((next, j, i) => put(j, entries[i])(next), jobs)));
     }
     out(lines, lines.join('\n') || 'No repo is connected.');
+    break;
+  }
+  case 'watch': {
+    // Run by the server every 5 minutes (CloudCLI's start), so the rules hold however a job was made: in Paperclip's
+    // dashboard, by an assistant through Paperclip's MCP server (the Scheduler agent), or with this script.
+    // 1. A job seen for the first time gets no overlap and no backlog, as `create` sets them; a policy changed later
+    //    in the dashboard is left as the user set it.
+    // 2. Each repo's record gets this server's jobs as they are, in the format the other commands write. An entry of
+    //    the same title recorded by another server (a job recreated here, as `restore` does) is taken over once per
+    //    job; if that server takes it back, it is left to it, so two servers never rewrite each other every round.
+    //    A clone that isn't on its default branch, or is in a merge or rebase, waits; nothing is pulled unless the
+    //    record must change. Prints only what changed.
+    const STATE = path.join(path.dirname(CONFIG), 'watch.json');
+    let state = {};
+    try { state = JSON.parse(fs.readFileSync(STATE, 'utf8')); } catch {}
+    const seen = new Set(state.policies || []);
+    const lines = [];
+    for (const j of arr(await api('GET', `/api/companies/${company.id}/routines`))) {
+      if (seen.has(j.id) || j.status === 'archived') continue;
+      if (j.concurrencyPolicy !== 'skip_if_active' || j.catchUpPolicy !== 'skip_missed') {
+        await api('PATCH', `/api/routines/${j.id}`, { concurrencyPolicy: 'skip_if_active', catchUpPolicy: 'skip_missed' });
+        lines.push(`"${j.title}": no overlap and no backlog set (made outside the scheduled-jobs script)`);
+      }
+      seen.add(j.id);
+    }
+    if (seen.size !== (state.policies || []).length) {
+      fs.writeFileSync(STATE, JSON.stringify({ ...state, policies: [...seen] }, null, 2) + '\n', { mode: 0o600 });
+    }
+    const title = (x) => String(x?.title || '').toLowerCase();
+    const claimed = new Set(state.claimed || []);
+    const claiming = new Set();
+    for (const p of await projects(company)) {
+      if (!projectRepos(p).length) continue;
+      const dir = cloneOf(p);
+      if (!dir) continue;
+      const all = await projectJobs(p, true);
+      const live = all.filter((j) => j.status !== 'archived');
+      const archived = all.filter((j) => j.status === 'archived');
+      const entries = await Promise.all(live.map(entryOf));
+      const edit = (jobs) => {
+        let next = jobs.filter((x) => !(x.paperclipId && archived.some((j) => j.id === x.paperclipId)));
+        live.forEach((j, i) => {
+          let k = next.findIndex((x) => x.paperclipId === j.id);
+          if (k < 0) {
+            const other = next.findIndex((x) => x.paperclipId && title(x) === title(j));
+            if (other >= 0 && claimed.has(j.id)) return; // taken back by another server: left to it
+            if (other >= 0) { k = other; claiming.add(j.id); }
+          }
+          if (k < 0) k = next.findIndex((x) => !x.paperclipId && title(x) === title(j));
+          const entry = withSecrets(entries[i], next[k]?.secrets);
+          next = k < 0 ? [...next, entry] : next.map((x, n) => (n === k ? entry : x));
+        });
+        return next;
+      };
+      const rec = readRecord(dir);
+      if (rec.error) continue; // `list` reports it
+      if (!rec.jobs && !live.length) continue;
+      if (rec.jobs && JSON.stringify(edit(rec.jobs)) === JSON.stringify(rec.jobs)) continue;
+      const g = path.join(dir, '.git');
+      const branch = git(dir, 'branch', '--show-current').stdout.trim();
+      const main = git(dir, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD').stdout.trim().replace(/^origin\//, '');
+      const busy = ['MERGE_HEAD', 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD'].some((f) => fs.existsSync(path.join(g, f)))
+        ? 'is in the middle of a merge or rebase' : main && branch !== main ? `is on ${branch || 'a detached HEAD'}, not ${main}` : '';
+      if (busy) { lines.push(`${repoOf(p)}'s ${RECORD} waits: the clone ${dir} ${busy}. Run sync there once it is back.`); continue; }
+      const saved = await saveRecord(p, 'Jobs recorded as they are in Paperclip (made or changed outside the scheduled-jobs script)', edit);
+      lines.push(saved);
+      if (claiming.size && /^Recorded in/.test(saved)) {
+        lines.push(`  It now records ${live.filter((j) => claiming.has(j.id)).map((j) => `"${j.title}"`).join(', ')} as this server's job, in place of another server's entry of the same title.`);
+        for (const id of claiming) claimed.add(id);
+        claiming.clear();
+        let cur = {};
+        try { cur = JSON.parse(fs.readFileSync(STATE, 'utf8')); } catch {}
+        fs.writeFileSync(STATE, JSON.stringify({ ...cur, claimed: [...claimed] }, null, 2) + '\n', { mode: 0o600 });
+      }
+    }
+    if (lines.length) out(lines, lines.join('\n'));
     break;
   }
   case 'run': {

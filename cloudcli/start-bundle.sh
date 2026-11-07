@@ -40,5 +40,19 @@ LOGIN=$(printf '%s\n%s' "$CLOUDCLI_USERNAME" "$CLOUDCLI_PASSWORD")
 ) &
 unset LOGIN
 
+# Every 5 minutes, the rules for jobs made outside the scheduled-jobs script (Paperclip's dashboard, an assistant
+# through Paperclip's MCP server): no overlap and no backlog, and each job recorded in its repo's .claude/jobs.json
+# (jobs.mjs watch). Logs only what changed, and a repeated message once.
+(
+  sleep 120
+  last=""
+  while true; do
+    out=$($AS_NODE node "$B/scheduled-jobs/jobs.mjs" watch 2>&1)
+    if [ -n "$out" ] && [ "$out" != "$last" ]; then printf '%s\n' "$out" | sed 's/^/[jobs] /'; fi
+    last=$out
+    sleep 300
+  done
+) &
+
 export PORT=$INNER_PORT
 exec bash "$B/start.sh"
