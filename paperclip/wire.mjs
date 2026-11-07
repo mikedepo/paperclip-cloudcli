@@ -396,6 +396,23 @@ async function nativeRunner(agent) {
   return agent;
 }
 
+// The native runner's preconfigured home is Paperclip's own (HOME, /paperclip). Its runs are unattended: the runner
+// turns down every permission prompt, so a job's Bash or edits would be refused. Claude Code's user settings there
+// skip the prompts (permissions.defaultMode "bypassPermissions", honoured by the ACP adapter for a non-root user),
+// as the legacy adapter's dangerouslySkipPermissions did. The rest of the file is left as it is.
+function unattendedClaude() {
+  const file = path.join(process.env.HOME || HOME, '.claude', 'settings.json');
+  let cur = {};
+  if (fs.existsSync(file)) {
+    try { cur = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { log(`${file} is not valid JSON; the Runner's permission prompts are not skipped`); return; }
+  }
+  if (cur.permissions?.defaultMode === 'bypassPermissions') return;
+  cur.permissions = { ...(cur.permissions || {}), defaultMode: 'bypassPermissions' };
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(cur, null, 2) + '\n');
+  log(`the Runner's runs skip permission prompts, as before (${file})`);
+}
+
 // Rewrites an agent's AGENTS.md when it differs from the template's.
 async function keepInstructions(agent, content, name) {
   const cur = await call('GET', `/api/agents/${agent.id}/instructions-bundle/file?path=AGENTS.md`);
@@ -472,6 +489,7 @@ async function main() {
   state.companyId = company.id;
   await ensureSecret(company, state);
   const project = await ensureProject(company, usable, state);
+  unattendedClaude();
   const agent = await ensureRunner(company, cwd, state);
   state.agentId = agent.id;
   const codex = await keepCodex(company, cwd, state).catch((e) => { log(`keeping the Codex agent failed (${e.message}); retried at the next start`); return null; });
