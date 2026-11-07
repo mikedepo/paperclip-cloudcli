@@ -88,7 +88,9 @@ async function handle(task) {
     const body = `${HEADING} ${ok ? 'ran' : 'stopped at a failed command'}${list.length ? ` (${list.length} command${list.length > 1 ? 's' : ''})` : ''}:\n\n${parts.join('\n\n')}`;
     await api('POST', `/issues/${task.id}/comments`, { body });
   }
-  await api('PATCH', `/issues/${task.id}`, { status: ok ? 'done' : 'blocked' });
+  // Paperclip 2026.1106 accepts 'blocked' only with what unblocks it.
+  await api('PATCH', `/issues/${task.id}`, ok ? { status: 'done' }
+    : { status: 'blocked', unblockDescriptor: { owner: 'board', action: 'Read the comment above, then give the Scheduler a new task with the corrected command.' } });
 }
 
 async function main() {
