@@ -20,7 +20,7 @@ import net from 'node:net';
 import path from 'node:path';
 import {
   APP, CONFIG, H, addProject, bindRunnerSecrets, claudeSignedIn, cloneRepo, cloudcliUrl, codexIntent, codexSignedIn,
-  connectCodexAgent, paperclipPublicUrl, pc, readJson, readSetup, repoInfo, repoProject, runnerContext, sameRepo,
+  connectCodexAgent, mcpCommand, mcpSetupUrl, mcpUrl, paperclipPublicUrl, pc, readJson, readSetup, repoInfo, repoProject, runnerContext, sameRepo,
   saveClaudeToken, timezone, updateSetup, upsertSecret, validZone, wireMemory, writeLayer, writePrivateJson, writeShellZone,
 } from './layer.mjs';
 
@@ -347,7 +347,7 @@ function state() {
       },
     },
     paperclipConnected: !!cfg.token,
-    links: { cloudcli: cloudcliUrl || '/', paperclip: paperclipPublicUrl },
+    links: { cloudcli: cloudcliUrl || '/', paperclip: paperclipPublicUrl, mcp: mcpUrl, mcpSetup: mcpSetupUrl, mcpCommand: mcpUrl ? mcpCommand : '' },
     done: !!s.done,
     skipped: !!s.skipped,
   };

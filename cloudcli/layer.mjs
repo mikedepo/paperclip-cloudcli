@@ -16,6 +16,10 @@ const SKILL_DIR = path.join(H, '.claude', 'skills', 'scheduled-jobs');
 export const log = (m) => console.log(`[wiring] ${m}`);
 export const cloudcliUrl = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '';
 export const paperclipPublicUrl = (process.env.PAPERCLIP_PUBLIC_URL || '').replace(/\/+$/, '');
+// Paperclip's MCP server, for assistants on people's own computers (Paperclip's wiring turns it on at every start).
+export const mcpUrl = paperclipPublicUrl ? `${paperclipPublicUrl}/mcp/paperclip` : '';
+export const mcpSetupUrl = paperclipPublicUrl ? `${paperclipPublicUrl}/mcp/setup` : '';
+export const mcpCommand = `claude mcp add --transport http paperclip ${mcpUrl || '<Paperclip public URL>/mcp/paperclip'}`;
 
 export function readJson(file, fallback = {}) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
@@ -149,6 +153,8 @@ export async function connectCodexAgent({ connectionId, grantId }) {
       title: 'Runs scheduled jobs with Codex',
       capabilities: 'Runs the repo skill each scheduled job names, then closes its task.',
       adapterType: 'codex_local',
+      // Paperclip 2026.1106 puts new Codex agents on its native runner, which drops the CLI engine; keep the legacy one.
+      runner: 'legacy',
       // The CLI engine runs the real codex CLI (`codex exec`), as the Runner runs the real claude CLI. No sandbox or
       // approvals, as the Runner skips permissions: nobody is there to approve, and the job follows a written skill.
       // No model: Codex's own default, which OpenAI keeps valid for ChatGPT sign-in; one picked in Paperclip is kept.
@@ -409,6 +415,8 @@ export function writeLayer() {
     lines.push(`- Jobs can also run with OpenAI's Codex instead of Claude, on the user's ChatGPT account, once the user connects it in the "Optional: Codex" card of ${setupPage}. Mention it only when the user asks for Codex, ChatGPT or OpenAI.`);
   }
   lines.push('- To list, create, change, pause, run or check jobs, use the `scheduled-jobs` skill.');
+  lines.push(`- Jobs can also be managed from the user's own computer: an assistant there (Claude Code, Codex, others) connects to Paperclip's MCP server, ${mcpUrl || "Paperclip's public URL + /mcp/paperclip"}, approves the connection in the browser with the same login, and gives Paperclip's "Scheduler" agent the scheduled-jobs commands. For Claude Code: \`${mcpCommand}\`, then \`/mcp\`, paperclip, Authenticate. Other assistants: ${mcpSetupUrl || "Paperclip's /mcp/setup page"}. Give this when the user asks how to use it from their computer.`);
+  lines.push("- Jobs made or changed outside the scheduled-jobs script (Paperclip's dashboard, an assistant through the MCP server) get the no-overlap and no-backlog rules and are recorded in their repo's `.claude/jobs.json` by this server within 5 minutes; `sync` records them at once.");
   lines.push(`- When the user greets you, asks what this is or what you can do, or seems unsure where to start, explain it in a few short lines. This server runs Claude on a schedule. They say in plain words what should be done and when; you write the job's instructions as a skill in their repo, schedule it in Paperclip and run it once to check. Paperclip then runs it on time and keeps every run: its status, what Claude did, and its usage, at ${paperclipPublicUrl || "Paperclip's address"} with the same login. They can also just work on their repo with you here, as with Claude Code anywhere. Then suggest two or three jobs that fit their repo (look at it first) and ask what they'd like.`);
   lines.push(`- The user's time zone is ${timezone()}: new jobs use it unless the user names another.`);
   if (!setup.claude?.done && !process.env.CLAUDE_CODE_OAUTH_TOKEN) {

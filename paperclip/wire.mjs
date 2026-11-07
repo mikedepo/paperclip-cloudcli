@@ -7,6 +7,10 @@
 //    them) and the "Runner" agent exist, keeps the Runner on the repo and its instructions current, and stores
 //    GH_TOKEN as the company secret GITHUB_TOKEN. Never renames a project or changes one that holds another repo.
 //    The optional "Codex" agent, once CloudCLI's /setup page has created it, is kept the same way (never created here).
+// 4. Turns on Paperclip's MCP server for assistants on people's own computers (the instance setting "Assistant
+//    connections (MCP)", off by default), and keeps the "Scheduler" agent that manages the jobs for them: Paperclip's
+//    MCP has no tools for routines, so an assistant gives the Scheduler a task with a scheduled-jobs command
+//    (scheduler.mjs runs it, no AI). Its board API key is in /paperclip/.bundle/scheduled-jobs.json (mode 600).
 // Idempotent: the IDs it created are kept in /paperclip/.bundle/state.json. Never prints the password or a token.
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -24,6 +28,20 @@ const CODEX_MD = fs.readFileSync(new URL('./codex.md', import.meta.url), 'utf8')
 const COMPANY = 'Jobs';
 const AGENT = 'Runner';
 const CODEX = 'Codex';
+const SCHEDULER = 'Scheduler';
+const SCHEDULER_MJS = new URL('./scheduler.mjs', import.meta.url).pathname;
+const JOBS_CONFIG = path.join(HOME, '.bundle', 'scheduled-jobs.json');
+const MANUAL = 'https://docs-production-3003.up.railway.app';
+// What an assistant connected through Paperclip's MCP server reads about each agent (paperclip_list_agents returns
+// the capabilities): how to manage jobs, and our conventions for them.
+const RUNNER_ABOUT = 'Runs the repo skill each scheduled job names, then closes its task. Jobs are created and changed through the Scheduler agent.';
+const SCHEDULER_ABOUT = [
+  "Manages this server's scheduled jobs (Paperclip routines run by the Runner agent). Give it a task (paperclip_create_task, assigneeAgentId: this agent) whose description is one command per line; it runs them at once, with no AI, posts the output as a comment and closes the task (blocked if a command failed). Read the answer with paperclip_read_task.",
+  'Commands: list | create "<title>" --prompt "Run the <name> skill." --cron "<min hour dom mon dow>" --tz <IANA zone> [--repo owner/name] [--paused] [--agent Codex] | update "<job>" [--title, --prompt, --cron, --tz, --repo, --agent] | pause, resume or archive "<job>" | run "<job>" | runs "<job>" | log "<job>".',
+  'Rules: one job runs one skill, .claude/skills/<name>/SKILL.md in the job\'s repo, committed and pushed before the job runs. The prompt is "Run the <name> skill." plus at most one line of arguments. The skill ends by marking its task done with a one-line summary, or blocked with the reason. After creating or changing a job, test it with run, then read log. Jobs never overlap and skip runs missed while the server was down; each is recorded in its repo\'s .claude/jobs.json by the server.',
+  `Guide: ${MANUAL}/connect/mcp/`,
+].join('\n');
+const MCP_PATH = '/mcp/paperclip'; // Paperclip's MCP endpoint (PUBLIC_MCP_PATH); its setup page is /mcp/setup
 const base = `http://127.0.0.1:${process.env.PORT || 3100}`;
 const publicUrl = (process.env.PAPERCLIP_PUBLIC_URL || '').trim().replace(/\/+$/, '');
 const origin = publicUrl.startsWith('http') ? new URL(publicUrl).origin : base;
@@ -231,8 +249,11 @@ async function ensureRunner(company, cwd, state) {
       name: AGENT,
       role: 'general',
       title: 'Runs scheduled jobs',
-      capabilities: 'Runs the repo skill each scheduled job names, then closes its task.',
+      capabilities: RUNNER_ABOUT,
       adapterType: 'claude_local',
+      // Paperclip 2026.1106 puts new Claude agents on its native "Paperclip Runner" on this image (Linux, glibc 2.41),
+      // which drops the CLI engine and the settings below; the legacy runner keeps them (existing agents keep theirs).
+      runner: 'legacy',
       // The CLI engine runs the real claude CLI, which reads CLAUDE_CODE_OAUTH_TOKEN and the repo's settings. Sonnet:
       // a job follows a written skill, and Opus would draw the subscription's limits down faster (Pro has little of
       // it). Set only here, so a model the user picks on the Runner's page in Paperclip is kept.
@@ -256,7 +277,92 @@ async function ensureRunner(company, cwd, state) {
     must(await call('PATCH', `/api/agents/${agent.id}`, { adapterConfig: { cwd } }), 'moving the Runner to the repo');
     log(`the Runner's working folder is now ${cwd}`);
   }
+  if (agent.capabilities !== RUNNER_ABOUT) await call('PATCH', `/api/agents/${agent.id}`, { capabilities: RUNNER_ABOUT });
   await keepInstructions(agent, RUNNER_MD, AGENT);
+  return agent;
+}
+
+// ---- assistants on people's own computers: Paperclip's MCP server, and the Scheduler agent ----
+
+// Paperclip's MCP server is the experimental instance setting "Assistant connections (MCP)", off by default; it is
+// turned on at every start. It needs PAPERCLIP_PUBLIC_URL (https), which the template sets.
+async function enableMcp() {
+  const cur = await call('GET', '/api/instance/settings/experimental');
+  if (!(cur.ok && cur.json?.enablePublicMcp === true)) {
+    const r = await call('PATCH', '/api/instance/settings/experimental', { enablePublicMcp: true });
+    if (!r.ok) { log(`turning on Paperclip's MCP server failed (${r.status}); retried at the next start`); return; }
+  }
+  log(`Paperclip's MCP server is on: ${publicUrl}${MCP_PATH} (setup: ${publicUrl}/mcp/setup). For Claude Code: claude mcp add --transport http paperclip ${publicUrl}${MCP_PATH}`);
+}
+
+// The Scheduler's scheduled-jobs script needs a board API key (agents' own keys may only manage routines assigned to
+// themselves). Kept while it works; a replaced one is revoked.
+async function ensureJobsKey() {
+  let saved = {};
+  try { saved = JSON.parse(fs.readFileSync(JOBS_CONFIG, 'utf8')); } catch {}
+  const zone = (() => { try { new Intl.DateTimeFormat('en', { timeZone: process.env.TZ }); return process.env.TZ || 'UTC'; } catch { return 'UTC'; } })();
+  // recordedBy: there is no clone here; CloudCLI's watch records the jobs in their repos.
+  const base_ = { url: base, publicUrl, timezone: zone, recordedBy: 'cloudcli' };
+  let works = false;
+  if (saved.token) {
+    try { works = (await fetch(`${base}/api/companies`, { headers: { authorization: `Bearer ${saved.token}`, accept: 'application/json' } })).ok; } catch {}
+  }
+  let next = { ...saved, ...base_ };
+  if (!works) {
+    const key = must(await call('POST', '/api/board-api-keys', { name: 'Scheduler (scheduled jobs)', expiresAt: null }), "creating the Scheduler's API key");
+    if (saved.keyId && saved.keyId !== key.id) await call('DELETE', `/api/board-api-keys/${saved.keyId}`).catch(() => {});
+    next = { ...next, keyId: key.id, token: key.token };
+  }
+  if (JSON.stringify(next) === JSON.stringify(saved)) return;
+  fs.mkdirSync(path.dirname(JOBS_CONFIG), { recursive: true });
+  fs.writeFileSync(JOBS_CONFIG, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 });
+  fs.chmodSync(JOBS_CONFIG, 0o600);
+  if (!works) log("stored the Scheduler's board API key (\"Scheduler (scheduled jobs)\")");
+}
+
+// The "Scheduler" agent: Paperclip's process adapter running scheduler.mjs (no AI, no cost) when it is given a task.
+async function ensureScheduler(company, state) {
+  const adapterConfig = {
+    command: 'node', args: [SCHEDULER_MJS], cwd: path.join(HOME, 'workspace'),
+    env: { SCHEDULED_JOBS_CONFIG: JOBS_CONFIG }, timeoutSec: 660,
+  };
+  let agent = null;
+  if (state.schedulerId) {
+    const r = await call('GET', `/api/agents/${state.schedulerId}`);
+    if (r.ok && r.json?.status !== 'terminated') agent = r.json;
+  }
+  if (!agent) {
+    const found = list(await call('GET', `/api/companies/${company.id}/agents`))
+      .find((a) => a.name === SCHEDULER && a.adapterType === 'process' && a.status !== 'terminated');
+    if (found) agent = must(await call('GET', `/api/agents/${found.id}`), 'reading the Scheduler agent');
+  }
+  if (!agent) {
+    agent = must(await call('POST', `/api/companies/${company.id}/agents`, {
+      name: SCHEDULER,
+      role: 'general',
+      title: 'Manages scheduled jobs',
+      capabilities: SCHEDULER_ABOUT,
+      adapterType: 'process',
+      adapterConfig,
+      // Wakes only for its tasks, never on a timer.
+      runtimeConfig: { heartbeat: { enabled: false, intervalSec: 0, wakeOnDemand: true } },
+    }), 'creating the Scheduler agent');
+    log(`created the agent "${SCHEDULER}" (manages the jobs for assistants connected through Paperclip's MCP server)`);
+  } else {
+    const cfg = agent.adapterConfig || {};
+    const patch = {};
+    if (agent.capabilities !== SCHEDULER_ABOUT) patch.capabilities = SCHEDULER_ABOUT;
+    if (cfg.command !== adapterConfig.command || JSON.stringify(cfg.args) !== JSON.stringify(adapterConfig.args)
+      || cfg.cwd !== adapterConfig.cwd || cfg.env?.SCHEDULED_JOBS_CONFIG !== JOBS_CONFIG || cfg.timeoutSec !== adapterConfig.timeoutSec) {
+      patch.adapterConfig = { ...adapterConfig, env: { ...(cfg.env || {}), ...adapterConfig.env } };
+    }
+    if (Object.keys(patch).length) {
+      must(await call('PATCH', `/api/agents/${agent.id}`, patch), 'updating the Scheduler agent');
+      log(`updated the agent "${SCHEDULER}"`);
+    }
+    if (agent.lifecycleError) await call('POST', `/api/agents/${agent.id}/lifecycle/retry`, {}).catch(() => {});
+  }
+  state.schedulerId = agent.id;
   return agent;
 }
 
@@ -339,9 +445,12 @@ async function main() {
   const agent = await ensureRunner(company, cwd, state);
   state.agentId = agent.id;
   const codex = await keepCodex(company, cwd, state).catch((e) => { log(`keeping the Codex agent failed (${e.message}); retried at the next start`); return null; });
+  await enableMcp().catch((e) => log(`turning on Paperclip's MCP server failed (${e.message}); retried at the next start`));
+  const scheduler = await ensureJobsKey().then(() => ensureScheduler(company, state))
+    .catch((e) => { log(`setting up the Scheduler agent failed (${e.message}); retried at the next start`); return null; });
   fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2) + '\n');
-  log(`ready: company "${company.name}", project "${project.name}", agent "${agent.name}"${codex ? ` and "${codex.name}"` : ''} in ${cwd}`);
+  log(`ready: company "${company.name}", project "${project.name}", agents "${agent.name}"${codex ? `, "${codex.name}"` : ''}${scheduler ? `, "${scheduler.name}"` : ''}; the Runner works in ${cwd}`);
 }
 
 main().catch((e) => log(`stopped: ${e.message}`));

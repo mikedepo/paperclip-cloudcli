@@ -38,7 +38,10 @@ const origin = new URL(publicUrl).origin;
 log("No admin yet: starting Paperclip once on 127.0.0.1 to create it.");
 const child = spawn(
   process.execPath,
-  ["--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"],
+  // The image's own start: Paperclip 2026.1106 and later boot from a precompiled bundle, older ones from the tsx build.
+  fs.existsSync("/app/server/dist-runtime/index.mjs")
+    ? ["server/dist-runtime/index.mjs"]
+    : ["--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"],
   {
     cwd: "/app",
     stdio: ["ignore", "inherit", "inherit"],

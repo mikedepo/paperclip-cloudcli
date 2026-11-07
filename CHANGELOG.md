@@ -2,6 +2,13 @@
 
 Each entry is an update Railway offers to existing deployments of the template. Updates are opt-in: nothing changes until you apply one, and your data is kept (see the README).
 
+## 2026-11-06
+
+- Manage your jobs from your own computer. Paperclip's MCP server is now on, so an assistant there (Claude Code, Codex and others) can list, create, change, pause and run your jobs with only your Paperclip address and a sign-in in your browser. For Claude Code: `claude mcp add --transport http paperclip <your Paperclip address>/mcp/paperclip`, then `/mcp` in Claude Code, choose paperclip and Authenticate. The setup page shows your exact command, and the manual has the steps for other assistants. The assistant works through a new "Scheduler" agent in Paperclip, which runs the same commands as Claude's jobs script in CloudCLI, with no AI and no cost.
+- Jobs made in Paperclip's dashboard or by an assistant follow the same rules as Claude's: they don't overlap or catch up on missed runs, and the server records them in their repo's `.claude/jobs.json` within 5 minutes. The record is committed in your repo's clone in CloudCLI, as before, and waits while that clone is on another branch.
+- Paperclip 2026.1106.0 (from 2026.1023.0). Your Runner, Codex agent and jobs are unchanged: new agents made by the template keep Paperclip's legacy runner, which the jobs rely on. Paperclip now hides tasks created by agents and routines from its task lists unless you turn on "show agent-created tasks", and cleans regenerable files (such as `node_modules`) out of finished task workspaces after an hour. See [Paperclip's release notes](https://github.com/paperclipai/paperclip/releases/tag/v2026.1106.0).
+- Applying this update restarts Paperclip on the new version, which upgrades its database on the first start (a few minutes on a large run history).
+
 ## 2026-11-04
 
 - Jobs can run with OpenAI's Codex instead of Claude, on your ChatGPT plan. It is optional: the setup page's new "Optional: Codex" card signs Codex in on your server with a one-time code (first turn on "Enable device code sign-in for Codex" in ChatGPT, Settings, Security and login) and adds a "Codex" agent in Paperclip. Then ask Claude to run a job with Codex. Claude's Runner stays the default, and your Runner and jobs are unchanged. Codex jobs reach GitHub as the Runner's do. A Codex job's own keys are named without KEY, SECRET or TOKEN, because Paperclip keeps such variables out of Codex's commands; Claude names them that way, and the jobs script warns otherwise.

@@ -127,6 +127,15 @@
       <p class="err" id="codexHereErr"></p>
     </section>
 
+    <section class="card hidden" id="mcpCard">
+      <h2>Optional: from your computer</h2>
+      <p>An assistant on your own computer (Claude Code, Codex and others) can list, create and change your jobs through Paperclip's MCP server. It needs only this address and a sign-in in your browser with the same login.</p>
+      <p class="small">MCP server: <code id="mcpUrl"></code></p>
+      <p class="small">For Claude Code, run this (click to copy), then <code>/mcp</code> in Claude Code, choose paperclip and Authenticate:</p>
+      <p class="example" id="mcpCommand" title="Click to copy"></p>
+      <p class="small">Other assistants: <a id="mcpSetup" target="_blank" rel="noopener">Paperclip's setup instructions</a>.</p>
+    </section>
+
     <section class="card" id="doneCard">
       <h2>What next</h2>
       <p>Tell Claude in CloudCLI what should be done and when, in plain words. Claude writes the job's instructions into your repo, schedules it in Paperclip and runs it once to check. Paperclip then runs it on time; every run's status, transcript and usage are on its dashboard, with the same login.</p>
@@ -193,6 +202,12 @@ function render(s) {
   pill('tzPill', s.timezone.value, s.timezone.chosen);
   if (!$('tzInput').value) $('tzInput').value = s.timezone.chosen ? s.timezone.value : (Intl.DateTimeFormat().resolvedOptions().timeZone || s.timezone.value);
   if (s.links.paperclip) { $('pcLink').href = s.links.paperclip; $('pcLink').classList.remove('hidden'); }
+  if (s.links.mcp) {
+    $('mcpUrl').textContent = s.links.mcp;
+    $('mcpCommand').textContent = s.links.mcpCommand;
+    $('mcpSetup').href = s.links.mcpSetup;
+    $('mcpCard').classList.remove('hidden');
+  }
   // The browser's zone is saved without a click; Save is only for another zone.
   const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   if (!s.timezone.chosen && browserZone && !zoneSaved) { zoneSaved = true; call('timezone', { timezone: browserZone }).then(render).catch(() => {}); }
