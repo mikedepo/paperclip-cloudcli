@@ -34,11 +34,13 @@ const JOBS_CONFIG = path.join(HOME, '.bundle', 'scheduled-jobs.json');
 const MANUAL = 'https://docs-production-3003.up.railway.app';
 // What an assistant connected through Paperclip's MCP server reads about each agent (paperclip_list_agents returns
 // the capabilities): how to manage jobs, and our conventions for them.
-const RUNNER_ABOUT = 'Runs the repo skill each scheduled job names, then closes its task. Jobs are created and changed through the Scheduler agent.';
+const RUNNER_ABOUT = 'Runs the repo skill each scheduled job names, then closes its task. Also does one-off requests: a task whose description says what to do once. Jobs are created and changed through the Scheduler agent.';
 const SCHEDULER_ABOUT = [
-  "Manages this server's scheduled jobs (Paperclip routines run by the Runner agent). Give it a task (paperclip_create_task, assigneeAgentId: this agent) whose description is one command per line; it runs them at once, with no AI, posts the output as a comment and closes the task (blocked if a command failed). Read the answer with paperclip_read_task.",
-  'Commands: list | create "<title>" --prompt "Run the <name> skill." --cron "<min hour dom mon dow>" --tz <IANA zone> [--repo owner/name] [--paused] [--agent Codex] | update "<job>" [--title, --prompt, --cron, --tz, --repo, --agent] | pause, resume or archive "<job>" | run "<job>" | runs "<job>" | log "<job>".',
-  'Rules: one job runs one skill, .claude/skills/<name>/SKILL.md in the job\'s repo, committed and pushed before the job runs. The prompt is "Run the <name> skill." plus at most one line of arguments. The skill ends by marking its task done with a one-line summary, or blocked with the reason. After creating or changing a job, test it with run, then read log. Jobs never overlap and skip runs missed while the server was down; each is recorded in its repo\'s .claude/jobs.json by the server.',
+  "Manages this server's scheduled jobs (Paperclip routines the Runner agent runs on a schedule). Give it a task (paperclip_create_task, assigneeAgentId: this agent) with one command per line in its description; it runs them at once, with no AI, posts the output as a comment and closes the task (blocked if a command failed). Read it with paperclip_read_task.",
+  "First run `repos`: a job runs a skill from one of the connected repos it lists. If the user's repo isn't one of them, stop before writing or pushing anything, and tell the user to connect it on step 3 of CloudCLI's /setup page, or offer a connected repo.",
+  'Something to do once ("say hi", "do X now") is not a job: give it to the Runner agent as a task with the request as its description. No skill, no push, no schedule.',
+  'Commands: repos | list | create "<title>" --prompt "Run the <name> skill." --cron "<min hour dom mon dow>" --tz <IANA zone> --repo owner/name [--paused] [--agent Codex] | update "<job>" [--title, --prompt, --cron, --tz, --repo, --agent] | pause, resume or archive "<job>" | run "<job>" | runs "<job>" | log "<job>".',
+  'Rules: one job runs one skill, .claude/skills/<name>/SKILL.md in a connected repo, pushed before the job runs. The prompt is "Run the <name> skill." plus at most one line of arguments. The skill ends by marking its task done with a one-line summary, or blocked with the reason. After creating or changing a job, test it with run, then read log. Jobs never overlap, skip runs missed while the server was down, and are recorded in their repo\'s .claude/jobs.json by the server.',
   `Guide: ${MANUAL}/connect/mcp/`,
 ].join('\n');
 const MCP_PATH = '/mcp/paperclip'; // Paperclip's MCP endpoint (PUBLIC_MCP_PATH); its setup page is /mcp/setup
@@ -245,27 +247,34 @@ async function ensureRunner(company, cwd, state) {
     agent = list(await call('GET', `/api/companies/${company.id}/agents`)).find((a) => a.name === AGENT && a.status !== 'terminated') || null;
   }
   if (!agent) {
-    agent = must(await call('POST', `/api/companies/${company.id}/agents`, {
+    const body = {
       name: AGENT,
       role: 'general',
       title: 'Runs scheduled jobs',
       capabilities: RUNNER_ABOUT,
       adapterType: 'claude_local',
-      // Paperclip 2026.1106 puts new Claude agents on its native "Paperclip Runner" on this image (Linux, glibc 2.41),
-      // which drops the CLI engine and the settings below; the legacy runner keeps them (existing agents keep theirs).
-      runner: 'legacy',
-      // The CLI engine runs the real claude CLI, which reads CLAUDE_CODE_OAUTH_TOKEN and the repo's settings. Sonnet:
-      // a job follows a written skill, and Opus would draw the subscription's limits down faster (Pro has little of
-      // it). Set only here, so a model the user picks on the Runner's page in Paperclip is kept.
-      adapterConfig: { engine: 'cli', cwd, dangerouslySkipPermissions: true, model: 'sonnet' },
+      // Paperclip's native runner (its default since 2026.1106), with the "preconfigured" home: Claude Code then loads
+      // the repo's own settings and skills (.claude/), as the jobs need; the default "isolated" home loads only
+      // skills assigned in Paperclip. The token from /setup is bound as CLAUDE_CODE_OAUTH_TOKEN, GitHub as GH_PAT.
+      // Sonnet: a job follows a written skill, and Opus would draw the subscription's limits down faster (Pro has
+      // little of it). Set only here, so a model the user picks on the Runner's page in Paperclip is kept.
+      runner: 'paperclip',
+      adapterConfig: { cwd, model: 'sonnet', homeMode: 'preconfigured', dangerouslySkipPermissions: true },
       // Wakes only for its tasks (each job run), never on a timer.
       runtimeConfig: { heartbeat: { enabled: false, intervalSec: 0, wakeOnDemand: true } },
       instructionsBundle: { entryFile: 'AGENTS.md', files: { 'AGENTS.md': RUNNER_MD } },
-    }), 'creating the Runner agent');
-    log(`created the agent "${AGENT}" (Claude Code, working folder ${cwd})`);
+    };
+    let r = await call('POST', `/api/companies/${company.id}/agents`, body);
+    if (r.status === 422 && /unavailable/i.test(r.text)) {
+      // A host the native runner doesn't support: the legacy adapter, with the real claude CLI.
+      r = await call('POST', `/api/companies/${company.id}/agents`, { ...body, runner: 'legacy', adapterConfig: { engine: 'cli', cwd, dangerouslySkipPermissions: true, model: 'sonnet' } });
+    }
+    agent = must(r, 'creating the Runner agent');
+    log(`created the agent "${AGENT}" (Claude Code on ${agent.adapterType === 'paperclip_runner' ? "Paperclip's native runner" : 'the legacy adapter'}, working folder ${cwd})`);
     signInHint(agent);
     return agent;
   }
+  agent = await nativeRunner(agent);
   // Paperclip checks a new Claude agent with a short test run and pauses it when Claude isn't signed in. Retry that
   // check at each start, so a token added later in Variables, or a sign-in made in Paperclip, takes effect.
   if (agent.lifecycleError) {
@@ -365,6 +374,25 @@ async function ensureScheduler(company, state) {
     if (agent.lifecycleError) await call('POST', `/api/agents/${agent.id}/lifecycle/retry`, {}).catch(() => {});
   }
   state.schedulerId = agent.id;
+  return agent;
+}
+
+// Keeps the Runner on Paperclip's native runner with the preconfigured home. A Runner from before (the legacy
+// claude_local adapter) is converted as Paperclip's "Upgrade runner" does, keeping its model, sign-in and
+// instructions; one converted by hand (the isolated home) gets the preconfigured home. If the conversion is refused
+// (an unsupported host), the legacy Runner stays as it is.
+async function nativeRunner(agent) {
+  if (agent.adapterType === 'claude_local') {
+    const r = await call('PATCH', `/api/agents/${agent.id}`, { runner: 'paperclip', adapterConfig: { homeMode: 'preconfigured' } });
+    if (!r.ok) { log(`moving the Runner to Paperclip's native runner failed (${r.status}: ${r.text}); it stays on the legacy adapter`); return agent; }
+    log("moved the Runner to Paperclip's native runner (the repo's settings and skills load as before)");
+    return r.json;
+  }
+  if (agent.adapterType === 'paperclip_runner' && agent.adapterConfig?.provider === 'acpx' && agent.adapterConfig?.homeMode !== 'preconfigured') {
+    const r = await call('PATCH', `/api/agents/${agent.id}`, { adapterConfig: { homeMode: 'preconfigured' } });
+    if (r.ok) { log("the Runner uses the preconfigured home (the repo's settings and skills)"); return r.json; }
+    log(`setting the Runner's preconfigured home failed (${r.status}: ${r.text})`);
+  }
   return agent;
 }
 

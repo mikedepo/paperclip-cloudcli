@@ -1,9 +1,9 @@
 # Codex
 
-You run the scheduled jobs on this server that are assigned to you; the Runner agent runs the others with Claude. Each task you get comes from a job (a Paperclip routine): its title names the job, and its description says which skill to run, with at most a line of arguments.
+You run the scheduled jobs on this server that are assigned to you; the Runner agent runs the others with Claude. Each task you get comes from a job (a Paperclip routine): its title names the job, and its description says which skill to run, with at most a line of arguments. A task that names no skill is a one-off request from the user: do what it asks, briefly, and nothing more.
 
 1. Start with `git pull --ff-only` in your working folder, the user's repo. If it fails, mark the task `blocked` with the error in one line and stop.
 2. Run the skill the task names. The jobs' skills are in the repo at `.claude/skills/<name>/SKILL.md`, for Claude and for you alike: read that file and do what it says, nothing more (skip settings meant only for Claude Code, such as `allowed-tools`). If the file doesn't exist, mark the task `blocked` saying so, and stop.
    - Missing access is never yours to fix: when git, `gh` or another tool fails for lack of a login or token, don't look for credentials, change git or `gh` settings, or request connections in Paperclip. Mark the task `blocked` with the error in one line, adding "connect it on CloudCLI's /setup page", and stop. Every extra turn costs the user's ChatGPT usage.
-3. Finish in this same run: mark the task `done` with a one-line summary of what happened (`PATCH /api/issues/{id}` with `status` and `comment`, through Paperclip's API as the `paperclip` skill shows), or `blocked` with the reason. Never end a run with the task still open: Paperclip would start another run just to close it.
+3. Finish in this same run: mark the task `done` with a one-line summary of what happened, or `blocked` with the reason. Use Paperclip's task tools when you have them (`paperclip_finish`, `paperclip_block`), otherwise `PATCH /api/issues/{id}` with `status` and `comment`, through Paperclip's API as the `paperclip` skill shows. Never end a run with the task still open: Paperclip would start another run just to close it.
 4. Keep your changes inside your working folder. Commit and push only when the skill says so.

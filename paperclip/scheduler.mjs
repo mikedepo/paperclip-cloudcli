@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 
 const JOBS = path.join(path.dirname(new URL(import.meta.url).pathname), 'scheduled-jobs', 'jobs.mjs');
-const COMMANDS = ['list', 'create', 'update', 'pause', 'resume', 'archive', 'run', 'runs', 'log'];
+const COMMANDS = ['repos', 'list', 'create', 'update', 'pause', 'resume', 'archive', 'run', 'runs', 'log'];
 const HEADING = '**Scheduler**';
 const API = (process.env.PAPERCLIP_API_URL || `http://127.0.0.1:${process.env.PORT || 3100}`).replace(/\/+$/, '').replace(/\/api$/, '');
 const KEY = process.env.PAPERCLIP_API_KEY || '';
@@ -57,11 +57,13 @@ function commands(text) {
 const HELP = [
   'No command found. Put one command per line in the task\'s description, for example:',
   '',
+  '    repos',
   '    list',
   '    create "Daily report" --prompt "Run the daily-report skill." --cron "0 9 * * 1-5" --tz Europe/Paris --repo owner/name',
   '    run "Daily report"',
   '',
   `Commands: ${COMMANDS.join(', ')}. The Scheduler agent's description in Paperclip has the rules.`,
+  'Something to do once is not a job: give it to the Runner agent as a task instead.',
 ].join('\n');
 
 const show = (w) => w.map((x) => (/[\s"']/.test(x) || !x ? JSON.stringify(x) : x)).join(' ');

@@ -76,7 +76,9 @@ export async function upsertSecret(company, name, value) {
 // The Runner's environment variable -> the company secret it comes from. A run gets only what is bound on its agent:
 // Paperclip uses the GITHUB_TOKEN company secret for its own checkouts, not inside runs (where, with no GitHub
 // connection set up in Paperclip, git and gh would look for a GitHub login of Paperclip's own that doesn't exist).
-export const RUNNER_SECRETS = { CLAUDE_CODE_OAUTH_TOKEN: 'CLAUDE_CODE_OAUTH_TOKEN', GH_TOKEN: 'GITHUB_TOKEN', GITHUB_TOKEN: 'GITHUB_TOKEN' };
+// GH_PAT too: Paperclip's native runner never passes GH_TOKEN or GITHUB_TOKEN to a run; the gh wrapper on Paperclip's
+// service (its start.sh) uses GH_PAT for gh and git when neither is set.
+export const RUNNER_SECRETS = { CLAUDE_CODE_OAUTH_TOKEN: 'CLAUDE_CODE_OAUTH_TOKEN', GH_TOKEN: 'GITHUB_TOKEN', GITHUB_TOKEN: 'GITHUB_TOKEN', GH_PAT: 'GITHUB_TOKEN' };
 // The Codex agent's: GitHub only. Its ChatGPT sign-in is Paperclip's own AI connection, bound in its runtimeConfig.
 // Paperclip keeps variables named *KEY*, *SECRET* or *TOKEN* out of Codex's commands, so the token is also GH_PAT,
 // which the gh wrapper on Paperclip's service (its start.sh) uses for gh and git.

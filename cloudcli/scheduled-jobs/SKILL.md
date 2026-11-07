@@ -10,6 +10,7 @@ Jobs run in Paperclip, on this server. A job is a schedule plus a one-line promp
 Script (prints text; `--json` for the raw API objects):
 
 ```
+node ~/.claude/skills/scheduled-jobs/jobs.mjs repos                                           # the connected repos
 node ~/.claude/skills/scheduled-jobs/jobs.mjs list                                            # each job's repo too
 node ~/.claude/skills/scheduled-jobs/jobs.mjs create "Daily report" --prompt "Run the daily-report skill." --cron "0 9 * * 1-5"   # server zone; --tz to override; --repo <name>
 node ~/.claude/skills/scheduled-jobs/jobs.mjs update "Daily report" --cron "30 8 * * 1-5"      # also --title, --prompt, --tz, --repo (moves it), --agent

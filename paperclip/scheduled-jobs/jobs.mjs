@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 const USAGE = `node jobs.mjs <command> [options]   (--json for raw output)
+  repos                                     the connected repos: a job runs a skill from one of them
   list                                      every job: status, repo, schedule, next and last run
   create "<title>" --prompt "<prompt>" [--cron "<min hour dom mon dow>"] [--tz <IANA zone, default: the server's TZ>] [--paused] [--agent <name>] [--repo <name or owner/name>] [--secrets "NAME,NAME"]
   update <job> [--title ...] [--prompt ...] [--cron ...] [--tz ...] [--repo ...] [--agent ...] [--secrets ...]   (--secrets "" clears them)
@@ -93,7 +94,8 @@ const noAgent = (name) => (/^codex$/i.test(String(name))
 
 // ---- repos: each connected repo has its own Paperclip project, whose primary workspace it is ----
 
-const SETUP_PAGE = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/setup` : "CloudCLI's /setup page";
+// On Paperclip's server (the Scheduler agent, cfg.recordedBy) the public domain is Paperclip's, not CloudCLI's.
+const SETUP_PAGE = process.env.RAILWAY_PUBLIC_DOMAIN && !cfg.recordedBy ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/setup` : "CloudCLI's /setup page";
 // "host/owner/name" in lower case from an https or ssh git address ('' otherwise); GitHub names ignore case.
 function repoKey(raw) {
   raw = String(raw || '').trim();
@@ -433,6 +435,13 @@ const { company } = ctx;
 PREFIX = company.issuePrefix || '';
 
 switch (cmd) {
+  case 'repos': {
+    const connected = (await projects(company)).filter((p) => projectRepos(p).length);
+    const rows = connected.map((p) => `${repoOf(p)}  ${projectRepos(p)[0].repoUrl}  (project "${p.name}")`);
+    out(connected.map((p) => ({ repo: repoOf(p), url: projectRepos(p)[0].repoUrl, project: p.name, projectId: p.id })),
+      `${rows.length ? `Connected repos (a job runs a skill from one of them):\n${rows.join('\n')}` : 'No repo is connected yet, so no job can be made.'}\nAnother repo is connected on step 3 of ${SETUP_PAGE}.`);
+    break;
+  }
   case 'list': {
     const jobs = await routines(company);
     const byId = new Map((await projects(company, true)).map((p) => [p.id, p]));
