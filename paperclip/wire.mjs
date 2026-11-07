@@ -352,9 +352,11 @@ async function ensureScheduler(company, state) {
     const cfg = agent.adapterConfig || {};
     const patch = {};
     if (agent.capabilities !== SCHEDULER_ABOUT) patch.capabilities = SCHEDULER_ABOUT;
+    // Paperclip keeps env values as bindings and hides them when read: only the key's presence can be checked. The
+    // Scheduler's env is the template's alone, so a change writes it whole.
     if (cfg.command !== adapterConfig.command || JSON.stringify(cfg.args) !== JSON.stringify(adapterConfig.args)
-      || cfg.cwd !== adapterConfig.cwd || cfg.env?.SCHEDULED_JOBS_CONFIG !== JOBS_CONFIG || cfg.timeoutSec !== adapterConfig.timeoutSec) {
-      patch.adapterConfig = { ...adapterConfig, env: { ...(cfg.env || {}), ...adapterConfig.env } };
+      || cfg.cwd !== adapterConfig.cwd || !cfg.env?.SCHEDULED_JOBS_CONFIG || cfg.timeoutSec !== adapterConfig.timeoutSec) {
+      patch.adapterConfig = adapterConfig;
     }
     if (Object.keys(patch).length) {
       must(await call('PATCH', `/api/agents/${agent.id}`, patch), 'updating the Scheduler agent');

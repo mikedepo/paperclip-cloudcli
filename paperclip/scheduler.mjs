@@ -79,7 +79,7 @@ async function handle(task) {
     for (const w of list) {
       const r = spawnSync(process.execPath, [JOBS, ...w], { encoding: 'utf8', timeout: 10 * 60e3, env: process.env, maxBuffer: 8 << 20 });
       const output = `${r.stdout || ''}${r.stderr ? `${r.stdout ? '\n' : ''}${r.stderr}` : ''}`.trim() || (r.error ? r.error.message : '(no output)');
-      parts.push(`\`${show(w)}\`\n\n\`\`\`text\n${output.slice(-12000)}\n\`\`\``);
+      parts.push(`\`\`\`text\n$ ${show(w)}\n${output.slice(-12000)}\n\`\`\``);
       log(`${issue.identifier || task.id}: ${w[0]} ${r.status === 0 ? 'done' : `failed (exit ${r.status})`}`);
       if (r.status !== 0) { ok = false; break; }
     }
