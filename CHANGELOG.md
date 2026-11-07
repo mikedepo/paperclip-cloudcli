@@ -2,6 +2,10 @@
 
 Each entry is an update Railway offers to existing deployments of the template. Updates are opt-in: nothing changes until you apply one, and your data is kept (see the README).
 
+## 2026-11-07 (2)
+
+- An assistant on your computer puts a job in the repo you name, or else in the repo of the folder it's working in, and stops to ask when that repo isn't connected to your server.
+
 ## 2026-11-07
 
 - Manage your jobs from your own computer. Paperclip's MCP server is now on, so an assistant there (Claude Code, Codex and others) can list, create, change, pause and run your jobs with only your Paperclip address and a sign-in in your browser. For Claude Code: `claude mcp add --transport http paperclip <your Paperclip address>/mcp/paperclip`, then `/mcp` in Claude Code, choose paperclip and Authenticate. The setup page shows your exact command, and the manual has the steps for other assistants. The assistant works through a new "Scheduler" agent in Paperclip, which runs the same commands as Claude's jobs script in CloudCLI, with no AI and no cost.
