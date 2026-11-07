@@ -202,14 +202,59 @@ async function jobRuns(job, limit) {
   return arr(await api('GET', `/api/routines/${job.id}/runs?limit=${limit}`));
 }
 
+// One line of text, at most n characters.
+const oneLine = (t, n = 240) => { const x = String(t ?? '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n - 1)}…` : x; };
+
+// Paperclip's native runner (2026.1106) logs its run as paperclip.prp.event records: the assistant's text arrives in
+// pieces (item.delta), each tool call as started/progressed/completed. Returns readable lines for one event, keeping
+// what it needs between events in `st` (the text so far, the command of each tool call).
+function nativeEvent(ev, st) {
+  const p = ev?.payload || {};
+  const flush = () => {
+    const out = [...st.text.values()].map((t) => oneLine(t, 400)).filter(Boolean).map((t) => t);
+    st.text.clear();
+    return out;
+  };
+  switch (ev?.eventType) {
+    case 'session.started': return [`[session] ${p.context?.model || ''} in ${p.context?.workingDirectory || '?'}`];
+    case 'item.delta':
+      if (p.kind === 'agentMessage') { const id = p.update?.itemId || 'text'; st.text.set(id, (st.text.get(id) || '') + (p.text || '')); }
+      return [];
+    case 'tool.execution.progressed':
+      if (p.progress && !/\(pending\)$/.test(p.progress)) st.cmd.set(p.executionId, p.progress);
+      return [];
+    case 'tool.execution.started': return flush();
+    case 'tool.execution.completed': {
+      const what = st.cmd.get(p.executionId) || '';
+      const shown = p.name === 'Terminal' ? `$ ${oneLine(what.split(': ').slice(1).join(': ') || what, 200)}` : `${p.name}${what && !what.includes(p.name) ? ` ${oneLine(what, 160)}` : ''}`;
+      let output = String(p.output ?? '');
+      try { const j = JSON.parse(output); if (Array.isArray(j) && j.length && j.every((c) => c?.type === 'text')) output = j.map((c) => c.text).join(' '); } catch {}
+      return [`[tool] ${shown}`, `  -> ${oneLine(output, 200) || '(no output)'}${p.exitCode ? ` (exit ${p.exitCode})` : ''}`];
+    }
+    case 'item.completed':
+      if (p.kind === 'agentMessage' && p.providerPhase === 'final_answer') { st.text.clear(); return [`[result] ${oneLine(p.text, 600)}`]; }
+      return [];
+    case 'turn.completed': return [...flush(), ...(p.error ? [`[error] ${oneLine(typeof p.error === 'string' ? p.error : JSON.stringify(p.error), 300)}`] : [])];
+    case 'run.terminal': return [`[done] run ${p.runTerminalState || '?'}${p.reportedWorkDisposition ? `, task ${p.reportedWorkDisposition}` : ''}`];
+    default:
+      return /error|fail/i.test(ev?.eventType || '') ? [`[${ev.eventType}] ${oneLine(JSON.stringify(p), 240)}`] : [];
+  }
+}
+
 function logText(content) {
   const lines = [];
+  const native = { text: new Map(), cmd: new Map() };
   for (const raw of String(content || '').split('\n')) {
     if (!raw.trim()) continue;
     let chunk = raw, stream = 'stdout';
     try { const j = JSON.parse(raw); if (typeof j.chunk === 'string') { chunk = j.chunk; stream = j.stream || stream; } } catch {}
     for (const l of chunk.split('\n')) {
       if (!l.trim()) continue;
+      // The native runner's own diagnostics: only problems are shown.
+      if (stream === 'stderr' && l.startsWith('[paperclip-runner]') && !/error|fail|denied|refused|timed out/i.test(l)) continue;
+      if (l.startsWith('{"type":"paperclip.prp.event"')) {
+        try { lines.push(...nativeEvent(JSON.parse(l).event, native).map((t) => (t.startsWith('[') || t.startsWith('  ') ? t : `[assistant] ${t}`))); continue; } catch {}
+      }
       // Claude Code's stream-json: show the text parts, not the event envelopes.
       let shown = l;
       try {
@@ -594,8 +639,9 @@ switch (cmd) {
     // dashboard, by an assistant through Paperclip's MCP server (the Scheduler agent), or with this script.
     // 1. A job seen for the first time gets no overlap and no backlog, as `create` sets them; a policy changed later
     //    in the dashboard is left as the user set it.
-    // 2. Each repo's record gets this server's jobs as they are, in the format the other commands write. Only entries
-    //    of this server's jobs are written (matched by Paperclip ID): another server's entry of the same title stays.
+    // 2. Each repo's record gets this server's jobs as they are, in the format the other commands write. An entry of
+    //    the same title recorded by another server (a job recreated here, as `restore` does) is taken over once per
+    //    job; if that server takes it back, it is left to it, so two servers never rewrite each other every round.
     //    A clone that isn't on its default branch, or is in a merge or rebase, waits; nothing is pulled unless the
     //    record must change. Prints only what changed.
     const STATE = path.join(path.dirname(CONFIG), 'watch.json');
@@ -615,6 +661,8 @@ switch (cmd) {
       fs.writeFileSync(STATE, JSON.stringify({ ...state, policies: [...seen] }, null, 2) + '\n', { mode: 0o600 });
     }
     const title = (x) => String(x?.title || '').toLowerCase();
+    const claimed = new Set(state.claimed || []);
+    const claiming = new Set();
     for (const p of await projects(company)) {
       if (!projectRepos(p).length) continue;
       const dir = cloneOf(p);
@@ -627,7 +675,11 @@ switch (cmd) {
         let next = jobs.filter((x) => !(x.paperclipId && archived.some((j) => j.id === x.paperclipId)));
         live.forEach((j, i) => {
           let k = next.findIndex((x) => x.paperclipId === j.id);
-          if (k < 0 && next.some((x) => x.paperclipId && title(x) === title(j))) return; // another server's job
+          if (k < 0) {
+            const other = next.findIndex((x) => x.paperclipId && title(x) === title(j));
+            if (other >= 0 && claimed.has(j.id)) return; // taken back by another server: left to it
+            if (other >= 0) { k = other; claiming.add(j.id); }
+          }
           if (k < 0) k = next.findIndex((x) => !x.paperclipId && title(x) === title(j));
           const entry = withSecrets(entries[i], next[k]?.secrets);
           next = k < 0 ? [...next, entry] : next.map((x, n) => (n === k ? entry : x));
@@ -644,7 +696,16 @@ switch (cmd) {
       const busy = ['MERGE_HEAD', 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD'].some((f) => fs.existsSync(path.join(g, f)))
         ? 'is in the middle of a merge or rebase' : main && branch !== main ? `is on ${branch || 'a detached HEAD'}, not ${main}` : '';
       if (busy) { lines.push(`${repoOf(p)}'s ${RECORD} waits: the clone ${dir} ${busy}. Run sync there once it is back.`); continue; }
-      lines.push(await saveRecord(p, 'Jobs recorded as they are in Paperclip (made or changed outside the scheduled-jobs script)', edit));
+      const saved = await saveRecord(p, 'Jobs recorded as they are in Paperclip (made or changed outside the scheduled-jobs script)', edit);
+      lines.push(saved);
+      if (claiming.size && /^Recorded in/.test(saved)) {
+        lines.push(`  It now records ${live.filter((j) => claiming.has(j.id)).map((j) => `"${j.title}"`).join(', ')} as this server's job, in place of another server's entry of the same title.`);
+        for (const id of claiming) claimed.add(id);
+        claiming.clear();
+        let cur = {};
+        try { cur = JSON.parse(fs.readFileSync(STATE, 'utf8')); } catch {}
+        fs.writeFileSync(STATE, JSON.stringify({ ...cur, claimed: [...claimed] }, null, 2) + '\n', { mode: 0o600 });
+      }
     }
     if (lines.length) out(lines, lines.join('\n'));
     break;

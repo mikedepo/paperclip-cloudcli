@@ -26,6 +26,11 @@ const STATE_FILE = path.join(HOME, '.bundle', 'state.json');
 const RUNNER_MD = fs.readFileSync(new URL('./runner.md', import.meta.url), 'utf8');
 const CODEX_MD = fs.readFileSync(new URL('./codex.md', import.meta.url), 'utf8');
 const COMPANY = 'Jobs';
+// The company's name carries a pointer for assistants connected through Paperclip's MCP server: its first call,
+// paperclip_connection, returns the company's name (not its description), and its tools have nothing named "routine"
+// or "job". A company still called "Jobs" (the template's name before) is renamed; another name the user chose stays.
+const COMPANY_NAME = 'Jobs (routines: give tasks to the Scheduler agent)';
+const COMPANY_ABOUT = "Scheduled jobs (Paperclip routines), run by the Runner agent. To create or change them, give tasks to the Scheduler agent; paperclip_list_agents describes it.";
 const AGENT = 'Runner';
 const CODEX = 'Codex';
 const SCHEDULER = 'Scheduler';
@@ -171,14 +176,22 @@ async function syncPassword() {
 }
 
 async function ensureCompany(state) {
+  let company = null;
   if (state.companyId) {
     const r = await call('GET', `/api/companies/${state.companyId}`);
-    if (r.ok && r.json?.status !== 'archived') return r.json;
+    if (r.ok && r.json?.status !== 'archived') company = r.json;
   }
-  const found = list(await call('GET', '/api/companies')).find((c) => c.name === COMPANY && c.status !== 'archived');
-  if (found) return found;
-  const company = must(await call('POST', '/api/companies', { name: COMPANY, description: 'Scheduled jobs, run by the Runner agent.' }), 'creating the company');
-  log(`created the company "${COMPANY}"`);
+  company ??= list(await call('GET', '/api/companies')).find((c) => [COMPANY, COMPANY_NAME].includes(c.name) && c.status !== 'archived') || null;
+  if (!company) {
+    // Created as "Jobs" so its tasks are numbered JOB-n, then named with the pointer below.
+    company = must(await call('POST', '/api/companies', { name: COMPANY, description: COMPANY_ABOUT }), 'creating the company');
+    log(`created the company "${COMPANY}"`);
+  }
+  if (company.name === COMPANY) {
+    const r = await call('PATCH', `/api/companies/${company.id}`, { name: COMPANY_NAME, description: COMPANY_ABOUT });
+    if (r.ok) { company = { ...company, ...r.json }; log(`named the company "${COMPANY_NAME}" (assistants read it first)`); }
+    else log(`renaming the company failed (${r.status})`);
+  }
   return company;
 }
 
