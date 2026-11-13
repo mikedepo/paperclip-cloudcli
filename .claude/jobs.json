@@ -1,0 +1,13 @@
+{
+  "about": "Scheduled jobs on this repo, kept by the scheduled-jobs skill (https://github.com/mikedepo/paperclip-cloudcli): every change to a job is a commit of this file. Each job runs its prompt in this repo with Claude Code (the Runner agent), or with the agent its \"agent\" names (Codex: OpenAI's Codex), on its 5-field cron schedule in its time zone; paused jobs don't run. To recreate them on a new server: node ~/.claude/skills/scheduled-jobs/jobs.mjs restore",
+  "jobs": [
+    {
+      "title": "Summarize new issues",
+      "prompt": "Run the summarize-new-issues skill.",
+      "cron": "0 8 * * 1-5",
+      "timezone": "America/New_York",
+      "status": "active",
+      "paperclipId": "2f9aa13c-f321-4747-aeb9-693ed8531f91"
+    }
+  ]
+}
