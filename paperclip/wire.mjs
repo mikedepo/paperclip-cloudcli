@@ -266,28 +266,23 @@ async function ensureRunner(company, cwd, state) {
       title: 'Runs scheduled jobs',
       capabilities: RUNNER_ABOUT,
       adapterType: 'claude_local',
-      // Paperclip's native runner (its default since 2026.1106), with the "preconfigured" home: Claude Code then loads
-      // the repo's own settings and skills (.claude/), as the jobs need; the default "isolated" home loads only
-      // skills assigned in Paperclip. The token from /setup is bound as CLAUDE_CODE_OAUTH_TOKEN, GitHub as GH_PAT.
+      // The legacy adapter (the real claude CLI): a new agent on Paperclip's native runner never passes Paperclip's
+      // check in the official image (paperclipai/paperclip#18557). runnerEngine moves it to the native runner once
+      // Paperclip's test of that passes. The token from /setup is bound as CLAUDE_CODE_OAUTH_TOKEN, GitHub as GH_PAT.
       // Sonnet: a job follows a written skill, and Opus would draw the subscription's limits down faster (Pro has
       // little of it). Set only here, so a model the user picks on the Runner's page in Paperclip is kept.
-      runner: 'paperclip',
-      adapterConfig: { cwd, model: 'sonnet', homeMode: 'preconfigured', dangerouslySkipPermissions: true },
+      runner: 'legacy',
+      adapterConfig: { engine: 'cli', cwd, model: 'sonnet', dangerouslySkipPermissions: true },
       // Wakes only for its tasks (each job run), never on a timer.
       runtimeConfig: { heartbeat: { enabled: false, intervalSec: 0, wakeOnDemand: true } },
       instructionsBundle: { entryFile: 'AGENTS.md', files: { 'AGENTS.md': RUNNER_MD } },
     };
-    let r = await call('POST', `/api/companies/${company.id}/agents`, body);
-    if (r.status === 422 && /unavailable/i.test(r.text)) {
-      // A host the native runner doesn't support: the legacy adapter, with the real claude CLI.
-      r = await call('POST', `/api/companies/${company.id}/agents`, { ...body, runner: 'legacy', adapterConfig: { engine: 'cli', cwd, dangerouslySkipPermissions: true, model: 'sonnet' } });
-    }
-    agent = must(r, 'creating the Runner agent');
-    log(`created the agent "${AGENT}" (Claude Code on ${agent.adapterType === 'paperclip_runner' ? "Paperclip's native runner" : 'the legacy adapter'}, working folder ${cwd})`);
+    agent = must(await call('POST', `/api/companies/${company.id}/agents`, body), 'creating the Runner agent');
+    log(`created the agent "${AGENT}" (Claude Code on the legacy adapter, working folder ${cwd})`);
     signInHint(agent);
     return agent;
   }
-  agent = await nativeRunner(agent);
+  agent = await runnerEngine(agent, company, state);
   // Paperclip checks a new Claude agent with a short test run and pauses it when Claude isn't signed in. Retry that
   // check at each start, so a token added later in Variables, or a sign-in made in Paperclip, takes effect.
   if (agent.lifecycleError) {
@@ -390,18 +385,39 @@ async function ensureScheduler(company, state) {
   return agent;
 }
 
-// Keeps the Runner on Paperclip's native runner with the preconfigured home. A Runner from before (the legacy
-// claude_local adapter) is converted as Paperclip's "Upgrade runner" does, keeping its model, sign-in and
-// instructions; one converted by hand (the isolated home) gets the preconfigured home. If the conversion is refused
-// (an unsupported host), the legacy Runner stays as it is.
-async function nativeRunner(agent) {
-  if (agent.adapterType === 'claude_local') {
+// Which engine runs the Runner. The goal is Paperclip's native runner with the preconfigured home (the repo's own
+// settings and skills load), but in the official image Paperclip's check of a native agent fails
+// (paperclipai/paperclip#18557: the Claude ACP package resolves outside the provider root it checks), so a Runner
+// created there, or converted before passing its check, stays paused and no job runs. So:
+// - a native Runner stuck in that check goes back to the legacy adapter (keeping its model, sign-in and instructions);
+// - a legacy Runner that passed its check moves to the native runner only once Paperclip's own test of that setup
+//   passes, as "Upgrade runner" does plus the preconfigured home. A version whose test doesn't pass isn't asked again.
+// - one converted by hand (the isolated home) gets the preconfigured home.
+async function runnerEngine(agent, company, state) {
+  const native = agent.adapterType === 'paperclip_runner' && agent.adapterConfig?.provider === 'acpx';
+  if (native && agent.lifecycleError) {
+    const c = agent.adapterConfig;
+    const r = await call('PATCH', `/api/agents/${agent.id}`, { adapterType: 'claude_local', runner: 'legacy', adapterConfig: { engine: 'cli', cwd: c.cwd, model: c.model || 'sonnet', dangerouslySkipPermissions: true } });
+    if (!r.ok) { log(`moving the Runner back to the legacy adapter failed (${r.status}: ${r.text})`); return agent; }
+    log("moved the Runner back to the legacy adapter: Paperclip's check of its native runner fails here (paperclipai/paperclip#18557)");
+    return r.json;
+  }
+  if (agent.adapterType === 'claude_local' && !agent.lifecycleError) {
+    const version = (await call('GET', '/api/health')).json?.version || '';
+    if (state.nativeRunnerFailed === version) return agent;
+    const t = await call('POST', `/api/companies/${company.id}/adapters/claude_local/test-environment`, { adapterConfig: { ...agent.adapterConfig, homeMode: 'preconfigured' }, runner: 'paperclip', agentId: agent.id });
+    if (!t.ok || t.json?.status !== 'pass') {
+      state.nativeRunnerFailed = version;
+      log(`the Runner stays on the legacy adapter: Paperclip ${version}'s test of its native runner doesn't pass (${t.ok ? (t.json?.checks || []).filter((x) => x.level === 'error').map((x) => x.code).join(', ') || t.json?.status : t.status})`);
+      return agent;
+    }
     const r = await call('PATCH', `/api/agents/${agent.id}`, { runner: 'paperclip', adapterConfig: { homeMode: 'preconfigured' } });
     if (!r.ok) { log(`moving the Runner to Paperclip's native runner failed (${r.status}: ${r.text}); it stays on the legacy adapter`); return agent; }
+    delete state.nativeRunnerFailed;
     log("moved the Runner to Paperclip's native runner (the repo's settings and skills load as before)");
     return r.json;
   }
-  if (agent.adapterType === 'paperclip_runner' && agent.adapterConfig?.provider === 'acpx' && agent.adapterConfig?.homeMode !== 'preconfigured') {
+  if (native && agent.adapterConfig?.homeMode !== 'preconfigured') {
     const r = await call('PATCH', `/api/agents/${agent.id}`, { adapterConfig: { homeMode: 'preconfigured' } });
     if (r.ok) { log("the Runner uses the preconfigured home (the repo's settings and skills)"); return r.json; }
     log(`setting the Runner's preconfigured home failed (${r.status}: ${r.text})`);

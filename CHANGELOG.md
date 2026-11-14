@@ -2,6 +2,10 @@
 
 Each entry is an update Railway offers to existing deployments of the template. Updates are opt-in: nothing changes until you apply one, and your data is kept (see the README).
 
+## 2026-11-14
+
+- Fixes scheduled jobs that never ran on servers deployed since the 2026-11-07 update: the Runner stayed paused because Paperclip's check of its native runner fails in Paperclip's Docker image ([paperclip#18557](https://github.com/paperclipai/paperclip/issues/18557)). The Runner now runs on the legacy adapter (the Claude Code CLI, as before 2026-11-07); a paused Runner is moved there at the next start and runs your jobs again. It moves to Paperclip's native runner by itself once a Paperclip version passes that check.
+
 ## 2026-11-07 (2)
 
 - An assistant on your computer puts a job in the repo you name, or else in the repo of the folder it's working in, and stops to ask when that repo isn't connected to your server.
