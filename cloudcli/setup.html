@@ -34,6 +34,15 @@
   a.btnlink { display: inline-flex; align-items: center; padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); text-decoration: none; word-break: normal; }
   .example { color: var(--text); background: #0b0d11; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; cursor: copy; }
   .example.copied { border-color: var(--ok); }
+  .field { flex: 1 1 220px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--sub); }
+  .dom { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 10px; }
+  .dom h3 { font-size: 15px; margin: 0 0 4px; }
+  .dom ol { margin: 4px 0 8px; padding-left: 20px; color: var(--sub); }
+  .dom li { margin: 3px 0; }
+  .chk { margin: 3px 0; }
+  .chk.ok { color: var(--ok); }
+  .chk.bad { color: var(--bad); }
+  .chk.wait { color: var(--sub); }
 </style>
 </head>
 <body>
@@ -136,6 +145,15 @@
       <p class="small">Other assistants: <a id="mcpSetup" target="_blank" rel="noopener">Paperclip's setup instructions</a>.</p>
     </section>
 
+    <section class="card" id="domainCard">
+      <h2>Optional: your own domains <span class="pill" id="domPill">Railway addresses</span></h2>
+      <p>Put CloudCLI and Paperclip on addresses of your own, such as cloudcli.example.com. Their Railway addresses keep working.</p>
+      <div class="row"><label class="field">CloudCLI<input id="domCloudcli" placeholder="cloudcli.example.com" autocomplete="off"></label><label class="field">Paperclip<input id="domPaperclip" placeholder="paperclip.example.com" autocomplete="off"></label></div>
+      <div class="row"><button id="domSave">Save and check</button><button class="ghost hidden" id="domCheck">Check again</button></div>
+      <p class="err" id="domErr"></p>
+      <div id="domReport"></div>
+    </section>
+
     <section class="card" id="doneCard">
       <h2>What next</h2>
       <p>Tell Claude in CloudCLI what should be done and when, in plain words. Claude writes the job's instructions into your repo, schedules it in Paperclip and runs it once to check. Paperclip then runs it on time; every run's status, transcript and usage are on its dashboard, with the same login.</p>
@@ -208,6 +226,7 @@ function render(s) {
     $('mcpSetup').href = s.links.mcpSetup;
     $('mcpCard').classList.remove('hidden');
   }
+  renderDomains(s.domains);
   // The browser's zone is saved without a click; Save is only for another zone.
   const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   if (!s.timezone.chosen && browserZone && !zoneSaved) { zoneSaved = true; call('timezone', { timezone: browserZone }).then(render).catch(() => {}); }
@@ -218,6 +237,55 @@ function render(s) {
   if (!busy && polling) { clearInterval(polling); polling = null; }
 }
 async function refresh() { try { render(await call('state')); } catch (e) {} }
+
+// ---------- Optional: your own domains ----------
+let domChecks = null, domFilled = false, domAuto = false;
+const NAMES = { cloudcli: 'CloudCLI', paperclip: 'Paperclip' };
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; }
+function chk(box, state, text) { box.appendChild(el('p', 'chk small ' + state, (state === 'ok' ? '\u2713 ' : state === 'bad' ? '\u2717 ' : '') + text)); }
+function renderDomains(d) {
+  if (!d) return;
+  if (!domFilled) { $('domCloudcli').value = d.cloudcli; $('domPaperclip').value = d.paperclip; domFilled = true; }
+  const saved = ['cloudcli', 'paperclip'].filter((a) => d[a]);
+  $('domCheck').classList.toggle('hidden', !saved.length);
+  if (saved.length && !domChecks && !domAuto) { domAuto = true; $('domCheck').click(); }
+  const box = $('domReport'); box.textContent = '';
+  let inUse = 0;
+  for (const app of saved) {
+    const host = d[app], c = domChecks && domChecks[app] && domChecks[app].host === host ? domChecks[app] : null;
+    const name = NAMES[app];
+    const part = el('div', 'dom');
+    part.appendChild(el('h3', '', name + ': ' + host));
+    const ol = el('ol', 'small');
+    ol.appendChild(el('li', '', 'In Railway, open the ' + name + ' service, then Settings. Under Networking, press Custom Domain.'));
+    ol.appendChild(el('li', '', 'Enter ' + host + ', choose port ' + d.ports[app] + (app === 'cloudcli' && d.ports.inner ? ' (not ' + d.ports.inner + ')' : '') + ', and press Add Domain.'));
+    ol.appendChild(el('li', '', 'At your domain\'s DNS provider, add the records Railway shows. Railway then issues the HTTPS certificate, usually within minutes.'));
+    if (app === 'paperclip' && !(c && c.inUse)) ol.appendChild(el('li', '', 'Once the DNS record works (checked below), redeploy Paperclip in Railway (Deployments, the latest one\'s \u22ee menu, Redeploy). It takes the new address at its start.'));
+    part.appendChild(ol);
+    if (!c) { chk(part, 'wait', 'Checking\u2026'); box.appendChild(part); continue; }
+    chk(part, c.dns.ok ? 'ok' : 'bad', c.dns.elsewhere ? 'DNS: points to ' + c.dns.target + ', not to the record Railway shows' : c.dns.ok ? 'DNS: points to ' + c.dns.target : 'DNS: no record yet');
+    chk(part, c.https.ok ? 'ok' : c.https.redeploy || c.https.wait ? 'wait' : 'bad', c.https.ok ? 'HTTPS: reaches your ' + name : 'HTTPS: ' + c.https.why);
+    if (app === 'cloudcli') {
+      chk(part, c.inUse ? 'ok' : 'wait', c.inUse ? 'In use: links and Claude\'s instructions use it now.' : 'CloudCLI uses its Railway address until this works.');
+    } else if (c.inUse) {
+      chk(part, c.https.ok ? 'ok' : 'bad', 'Paperclip uses it' + (c.https.ok ? ': links, the MCP address and Claude\'s instructions point to it.' : ', but it isn\'t reachable yet: add the DNS record.'));
+    } else {
+      chk(part, 'bad', 'Paperclip still uses ' + (c.current || 'its Railway address') + '. ' + (c.dns.ok ? 'Redeploy Paperclip in Railway, then press Check again.' : 'Redeploy it once the DNS record works.'));
+    }
+    if (c.inUse && (app === 'cloudcli' || c.https.ok)) inUse++;
+    box.appendChild(part);
+  }
+  if (saved.length) {
+    box.appendChild(el('p', 'small', 'Sign in once on each new address: your sign-in is kept per address. The Railway addresses keep working.'));
+    if (d.paperclip) {
+      const p = el('p', 'small', 'Assistants connected from your computer with the old Paperclip address stop working once Paperclip uses the new one. Add them again: ');
+      p.appendChild(el('code', '', 'claude mcp remove paperclip'));
+      p.appendChild(document.createTextNode(', then the command in "Optional: from your computer".'));
+      box.appendChild(p);
+    }
+  }
+  pill('domPill', saved.length ? (inUse === saved.length ? 'in use' : inUse + ' of ' + saved.length + ' in use') : 'Railway addresses', saved.length && inUse === saved.length);
+}
 // busy: what the button says while its step runs, so a slow start doesn't look frozen.
 function act(btn, errId, fn, busy) {
   $(btn).onclick = async () => {
@@ -254,6 +322,11 @@ act('repoUse', 'repoErr', async () => {
   $('repoMsg').textContent = (r.cloned ? 'Cloned into ' : 'In ') + r.dir + (r.memory ? ', with its .claude/memory/ as Claude\'s memory' : '') + '. ' + r.paperclip + '.';
   render(r.state);
 }, 'Cloning…');
+act('domSave', 'domErr', async () => {
+  const r = await call('domains', { cloudcli: $('domCloudcli').value, paperclip: $('domPaperclip').value });
+  domChecks = r.checks; render(r.state);
+}, 'Checking\u2026');
+act('domCheck', 'domErr', async () => { const r = await call('domains/check', {}); domChecks = r.checks; render(r.state); }, 'Checking\u2026');
 act('tzSave', 'tzErr', async () => render(await call('timezone', { timezone: $('tzInput').value.trim() })));
 act('codexStart', 'codexErr', async () => render(await call('codex/start', {})), 'Asking Paperclip for a code…');
 act('codexHereStart', 'codexHereErr', async () => render(await call('codex/here', {})), 'Starting Codex…');

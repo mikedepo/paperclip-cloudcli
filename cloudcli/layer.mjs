@@ -3,6 +3,7 @@
 // file, and the instruction layer (the ~/.claude/CLAUDE.md block and the scheduled-jobs skill). Own names only.
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import dns from 'node:dns';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -14,12 +15,98 @@ export const SETUP = path.join(H, '.config', 'paperclip-cloudcli', 'setup.json')
 const SRC = path.join(path.dirname(new URL(import.meta.url).pathname), 'scheduled-jobs');
 const SKILL_DIR = path.join(H, '.claude', 'skills', 'scheduled-jobs');
 export const log = (m) => console.log(`[wiring] ${m}`);
-export const cloudcliUrl = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '';
-export const paperclipPublicUrl = (process.env.PAPERCLIP_PUBLIC_URL || '').replace(/\/+$/, '');
+const PAPERCLIP_URL = (process.env.PAPERCLIP_URL || '').replace(/\/+$/, '');
+
+// The apps' public addresses, read each time they are used, so a domain change reaches links, the setup page and
+// the CLAUDE.md block without a redeploy of CloudCLI. Railway makes a custom domain the public one (RAILWAY_PUBLIC_DOMAIN,
+// so Paperclip's PAPERCLIP_PUBLIC_URL) as soon as it is added, before its DNS record exists: links move to a new
+// address only once it reaches the app, and keep the last one that did until then.
+// CloudCLI's (setup.json `domains`, kept by the setup page, front.mjs): a domain of the user's that reached this server
+// on the "Your own domains" card, else Railway's public domain while it reaches this server, else the last address
+// that did, else the Railway address browsers last used (an install updated after the switch knows no other).
+export function cloudcliUrl() {
+  const d = readSetup().domains || {};
+  const env = process.env.RAILWAY_PUBLIC_DOMAIN || '';
+  const host = d.cloudcli?.host && d.cloudcli.verified ? d.cloudcli.host
+    : env && d.env?.host === env && d.env.ok ? env : d.lastWorking || d.railway || env;
+  return host ? `https://${host}` : '';
+}
+// Paperclip's, for links (kept in the scheduled-jobs connection file, whose links use it too): the address Paperclip
+// reports while it reaches Paperclip, else the last one that did (refreshPaperclipUrl); before CloudCLI first asked,
+// PAPERCLIP_PUBLIC_URL as of CloudCLI's last deploy.
+export function paperclipPublicUrl() {
+  return (readJson(CONFIG).publicUrl || process.env.PAPERCLIP_PUBLIC_URL || '').replace(/\/+$/, '');
+}
 // Paperclip's MCP server, for assistants on people's own computers (Paperclip's wiring turns it on at every start).
-export const mcpUrl = paperclipPublicUrl ? `${paperclipPublicUrl}/mcp/paperclip` : '';
-export const mcpSetupUrl = paperclipPublicUrl ? `${paperclipPublicUrl}/mcp/setup` : '';
-export const mcpCommand = `claude mcp add --transport http paperclip ${mcpUrl || '<Paperclip public URL>/mcp/paperclip'}`;
+// Always on the address Paperclip reports: its OAuth connections are bound to it, and fail on any other.
+const mcpBase = () => (readJson(CONFIG).issuer || paperclipPublicUrl());
+export const mcpUrl = () => (mcpBase() ? `${mcpBase()}/mcp/paperclip` : '');
+export const mcpSetupUrl = () => (mcpBase() ? `${mcpBase()}/mcp/setup` : '');
+export const mcpCommand = () => `claude mcp add --transport http paperclip ${mcpUrl() || '<Paperclip public URL>/mcp/paperclip'}`;
+
+// Paperclip's public address as Paperclip reports it: the issuer of its OAuth metadata, which is its
+// PAPERCLIP_PUBLIC_URL as of its last start, read over the private network. null while Paperclip doesn't answer (it
+// is starting, or its MCP server was turned off in its settings).
+export async function paperclipIssuer(base = readJson(CONFIG).url || PAPERCLIP_URL) {
+  if (!base) return null;
+  try {
+    const r = await fetch(`${base}/.well-known/oauth-authorization-server`, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return null;
+    const u = new URL((await r.json()).issuer);
+    return u.protocol === 'https:' ? u.origin : null;
+  } catch { return null; }
+}
+// A domain's public DNS, as browsers see it: asked of public resolvers, not of Railway's own, which can already send
+// a domain added on one of its services there while the domain's public record points elsewhere (seen on the test
+// project); the system resolver only when the public ones don't answer. Railway asks for a CNAME to
+// <id>.up.railway.app: a CNAME elsewhere (an old host, a wildcard record) is wrong; an address without a CNAME may be
+// right (a proxy such as Cloudflare's flattens it), and HTTPS settles it.
+export async function publicDns(host) {
+  const ask = async (resolver) => {
+    const q = (fn) => resolver[fn](host).catch((e) => {
+      if (['ETIMEOUT', 'ECONNREFUSED', 'ESERVFAIL', 'ECANCELLED'].includes(e.code)) throw e;
+      return [];
+    });
+    return Promise.all([q('resolveCname'), q('resolve4'), q('resolve6')]);
+  };
+  let answers;
+  try {
+    const r = new dns.promises.Resolver({ timeout: 4000, tries: 2 });
+    r.setServers(['1.1.1.1', '8.8.8.8']);
+    answers = await ask(r);
+  } catch {
+    answers = await ask(dns.promises).catch(() => [[], [], []]);
+  }
+  const [cname, v4, v6] = answers;
+  const target = cname[0] || v4[0] || v6[0] || '';
+  const railway = /\.railway\.app$/.test(cname[0] || '');
+  return { ok: railway || (!cname[0] && !!target), target, railway, elsewhere: !!cname[0] && !railway };
+}
+const hostOf = (origin) => { try { return new URL(origin).hostname; } catch { return ''; } };
+
+// Whether a public address reaches this Paperclip: its public DNS works, and through it Paperclip reports the same
+// issuer (no key is sent).
+export async function reachesPaperclip(origin, issuer) {
+  if (!(await publicDns(hostOf(origin))).ok) return false;
+  try {
+    const r = await fetch(`${origin}/.well-known/oauth-authorization-server`, { headers: { accept: 'application/json' }, redirect: 'manual', signal: AbortSignal.timeout(10000) });
+    return r.ok && new URL((await r.json()).issuer).origin === issuer;
+  } catch { return false; }
+}
+// Keeps the stored addresses on what Paperclip reports. changed: the links, the MCP address and the CLAUDE.md block
+// (writeLayer) must follow. Nothing is stored before the scheduled-jobs skill is connected (wire.mjs connects it).
+export async function refreshPaperclipUrl() {
+  const issuer = await paperclipIssuer();
+  if (!issuer || !fs.existsSync(CONFIG)) return { issuer, changed: false };
+  const cfg = readJson(CONFIG);
+  let publicUrl = cfg.publicUrl || '';
+  if (publicUrl !== issuer && ((await reachesPaperclip(issuer, issuer)) || !publicUrl || !(await reachesPaperclip(publicUrl, issuer)))) publicUrl = issuer;
+  if (cfg.publicUrl === publicUrl && cfg.issuer === issuer) return { issuer, publicUrl, changed: false };
+  writePrivateJson(CONFIG, { ...cfg, publicUrl, issuer });
+  if (cfg.publicUrl !== publicUrl) log(`Paperclip's address for links is now ${publicUrl}${cfg.publicUrl ? ` (was ${cfg.publicUrl})` : ''}`);
+  if (publicUrl !== issuer) log(`Paperclip reports ${issuer} as its address, which doesn't reach it yet (DNS or HTTPS); links keep ${publicUrl}`);
+  return { issuer, publicUrl, changed: true };
+}
 
 export function readJson(file, fallback = {}) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
@@ -396,7 +483,9 @@ export function writeLayer() {
     '',
     "- A Railway server from AvgSoft's Paperclip + CloudCLI template: CloudCLI (this app; the home folder is kept on a volume) and Paperclip, which runs the scheduled jobs.",
   ];
-  const setupPage = `${cloudcliUrl || "CloudCLI's address"}/setup`;
+  const setupPage = `${cloudcliUrl() || "CloudCLI's address"}/setup`;
+  const pcUrl = paperclipPublicUrl();
+  const mcp = mcpUrl();
   const picked = repos();
   if (picked.length) {
     lines.push(`- The user's ${picked.length > 1 ? 'repos are' : 'repo is'} cloned here, each with its own project in Paperclip, where its jobs run on Paperclip's own checkout of it:`);
@@ -410,16 +499,16 @@ export function writeLayer() {
   } else {
     lines.push(`- No repo is picked yet, and jobs need one: each job runs a skill from it, pulled before every run. Send the user to step 3 of ${setupPage} rather than wiring one yourself: it clones the repo here, connects it to Paperclip's project and wires the shared memory.`);
   }
-  lines.push(`- Scheduled jobs run in Paperclip as the "Runner" agent, on its own checkout of the job's repo. Its dashboard is ${paperclipPublicUrl || "Paperclip's public URL"} (same login as here): give the user links to jobs and runs there; the scheduled-jobs script prints them.`);
+  lines.push(`- Scheduled jobs run in Paperclip as the "Runner" agent, on its own checkout of the job's repo. Its dashboard is ${pcUrl || "Paperclip's public URL"} (same login as here): give the user links to jobs and runs there; the scheduled-jobs script prints them.`);
   if (setup.codex?.done) {
     lines.push('- A "Codex" agent in Paperclip can also run jobs, with OpenAI\'s Codex on the user\'s ChatGPT account. Jobs use the Runner (Claude) unless the user asks for Codex; then the scheduled-jobs skill\'s `--agent Codex` gives the job to it. Codex reads the same skill file in the repo.');
   } else {
     lines.push(`- Jobs can also run with OpenAI's Codex instead of Claude, on the user's ChatGPT account, once the user connects it in the "Optional: Codex" card of ${setupPage}. Mention it only when the user asks for Codex, ChatGPT or OpenAI.`);
   }
   lines.push('- To list, create, change, pause, run or check jobs, use the `scheduled-jobs` skill.');
-  lines.push(`- Jobs can also be managed from the user's own computer: an assistant there (Claude Code, Codex, others) connects to Paperclip's MCP server, ${mcpUrl || "Paperclip's public URL + /mcp/paperclip"}, approves the connection in the browser with the same login, and gives Paperclip's "Scheduler" agent the scheduled-jobs commands. For Claude Code: \`${mcpCommand}\`, then \`/mcp\`, paperclip, Authenticate. Other assistants: ${mcpSetupUrl || "Paperclip's /mcp/setup page"}. Give this when the user asks how to use it from their computer.`);
+  lines.push(`- Jobs can also be managed from the user's own computer: an assistant there (Claude Code, Codex, others) connects to Paperclip's MCP server, ${mcp || "Paperclip's public URL + /mcp/paperclip"}, approves the connection in the browser with the same login, and gives Paperclip's "Scheduler" agent the scheduled-jobs commands. For Claude Code: \`${mcpCommand()}\`, then \`/mcp\`, paperclip, Authenticate. Other assistants: ${mcpSetupUrl() || "Paperclip's /mcp/setup page"}. Give this when the user asks how to use it from their computer.`);
   lines.push("- Jobs made or changed outside the scheduled-jobs script (Paperclip's dashboard, an assistant through the MCP server) get the no-overlap and no-backlog rules and are recorded in their repo's `.claude/jobs.json` by this server within 5 minutes; `sync` records them at once.");
-  lines.push(`- When the user greets you, asks what this is or what you can do, or seems unsure where to start, explain it in a few short lines. This server runs Claude on a schedule. They say in plain words what should be done and when; you write the job's instructions as a skill in their repo, schedule it in Paperclip and run it once to check. Paperclip then runs it on time and keeps every run: its status, what Claude did, and its usage, at ${paperclipPublicUrl || "Paperclip's address"} with the same login. They can also just work on their repo with you here, as with Claude Code anywhere. Then suggest two or three jobs that fit their repo (look at it first) and ask what they'd like.`);
+  lines.push(`- When the user greets you, asks what this is or what you can do, or seems unsure where to start, explain it in a few short lines. This server runs Claude on a schedule. They say in plain words what should be done and when; you write the job's instructions as a skill in their repo, schedule it in Paperclip and run it once to check. Paperclip then runs it on time and keeps every run: its status, what Claude did, and its usage, at ${pcUrl || "Paperclip's address"} with the same login. They can also just work on their repo with you here, as with Claude Code anywhere. Then suggest two or three jobs that fit their repo (look at it first) and ask what they'd like.`);
   lines.push(`- The user's time zone is ${timezone()}: new jobs use it unless the user names another.`);
   if (!setup.claude?.done && !process.env.CLAUDE_CODE_OAUTH_TOKEN) {
     lines.push(setup.codex?.done

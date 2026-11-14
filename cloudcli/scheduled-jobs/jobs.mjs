@@ -94,8 +94,16 @@ const noAgent = (name) => (/^codex$/i.test(String(name))
 
 // ---- repos: each connected repo has its own Paperclip project, whose primary workspace it is ----
 
-// On Paperclip's server (the Scheduler agent, cfg.recordedBy) the public domain is Paperclip's, not CloudCLI's.
-const SETUP_PAGE = process.env.RAILWAY_PUBLIC_DOMAIN && !cfg.recordedBy ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/setup` : "CloudCLI's /setup page";
+// On Paperclip's server (the Scheduler agent, cfg.recordedBy) the public domain is Paperclip's, not CloudCLI's. On
+// CloudCLI, the address that reaches it, as the setup page keeps it (cloudcliUrl in layer.mjs).
+const CLOUDCLI_HOST = (() => {
+  if (cfg.recordedBy) return '';
+  const env = process.env.RAILWAY_PUBLIC_DOMAIN || '';
+  let d = {};
+  try { d = JSON.parse(fs.readFileSync(SETUP, 'utf8')).domains || {}; } catch {}
+  return d.cloudcli?.host && d.cloudcli.verified ? d.cloudcli.host : env && d.env?.host === env && d.env.ok ? env : d.lastWorking || d.railway || env;
+})();
+const SETUP_PAGE = CLOUDCLI_HOST ? `https://${CLOUDCLI_HOST}/setup` : "CloudCLI's /setup page";
 // "host/owner/name" in lower case from an https or ssh git address ('' otherwise); GitHub names ignore case.
 function repoKey(raw) {
   raw = String(raw || '').trim();

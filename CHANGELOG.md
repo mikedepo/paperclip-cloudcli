@@ -2,6 +2,13 @@
 
 Each entry is an update Railway offers to existing deployments of the template. Updates are opt-in: nothing changes until you apply one, and your data is kept (see the README).
 
+## 2026-11-14 (2)
+
+- Put CloudCLI and Paperclip on domains of your own, such as `cloudcli.example.com`. The setup page's new "Optional: your own domains" card gives the Railway steps for each app with the right port, then checks the DNS record and HTTPS and says what is still missing. A CloudCLI domain is used as soon as it works; Paperclip takes its new domain at its next start (redeploy it in Railway once the DNS record works). Nothing else to change: no variables to edit.
+- Paperclip can no longer lock itself out. Its start always adds Railway's health check, its private address (CloudCLI's) and every public domain it has had to the hostnames it answers, whatever `PAPERCLIP_ALLOWED_HOSTNAMES` says. Your Railway addresses keep working next to your own domains, and an edit of that variable can't fail every deploy's health check any more.
+- CloudCLI asks Paperclip for its public address, at its start and every 5 minutes, so the links Claude gives you, the MCP address and the setup page follow a new Paperclip domain without a redeploy of CloudCLI.
+- Assistants connected from your computer with Paperclip's old address stop working once Paperclip uses a new one: add them again with the new address (the setup page shows the command).
+
 ## 2026-11-14
 
 - Fixes scheduled jobs that never ran on servers deployed since the 2026-11-07 update: the Runner stayed paused because Paperclip's check of its native runner fails in Paperclip's Docker image ([paperclip#18557](https://github.com/paperclipai/paperclip/issues/18557)). The Runner now runs on the legacy adapter (the Claude Code CLI, as before 2026-11-07); a paused Runner is moved there at the next start and runs your jobs again. It moves to Paperclip's native runner by itself once a Paperclip version passes that check.
