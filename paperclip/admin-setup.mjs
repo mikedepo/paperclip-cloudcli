@@ -29,6 +29,12 @@ function stop(reason) {
   process.exit(0);
 }
 if (!email || !email.includes("@")) stop("ADMIN_EMAIL is empty or not an email address.");
+// The password is needed only here, at the first start. An instance whose admin exists (the marker above) never gets
+// this far, so an empty one there is quiet.
+if (!password) {
+  log("ADMIN_PASSWORD is empty. It is needed at the first start, to create the admin: if this instance has no admin yet, set it in Variables and redeploy.");
+  process.exit(0);
+}
 if (password.length < 8 || password.length > 128) stop("ADMIN_PASSWORD must be 8 to 128 characters.");
 if (!publicUrl.startsWith("https://")) stop("PAPERCLIP_PUBLIC_URL is not an https URL (does the service have a public domain?).");
 

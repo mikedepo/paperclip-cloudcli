@@ -1,6 +1,6 @@
 #!/bin/sh
 # Runs as the node user. The hostnames Paperclip answers (below), the first admin from the deploy form (admin-setup.mjs,
-# from our Paperclip template, unchanged), then the wiring in the background (wire.mjs: repo, shared memory, company,
+# from our Paperclip template, shared), then the wiring in the background (wire.mjs: repo, shared memory, company,
 # project, the Runner agent), the shared-memory check (memory-sync.mjs, every minute, without the admin login in its
 # environment), then Paperclip.
 B=$(cd "$(dirname "$0")" && pwd)
@@ -33,8 +33,10 @@ export PAPERCLIP_ALLOWED_HOSTNAMES
 echo "[paperclip-cloudcli] Paperclip answers ${public_host:-its public URL} and: $PAPERCLIP_ALLOWED_HOSTNAMES"
 
 node "$B/admin-setup.mjs"
-# Subshells, so these are re-parented to tini (which reaps them) instead of to Paperclip's node process.
-( node "$B/wire.mjs" & )
+# Subshells, so these are re-parented to tini (which reaps them) instead of to Paperclip's node process. The wiring
+# gets the login on stdin, never in its environment: agents run as this same user, and a process's environment is
+# readable by its user. After the first start the wiring needs no password (its own API key, see wire.mjs).
+( printf '%s\n%s' "$ADMIN_EMAIL" "$ADMIN_PASSWORD" | env -u ADMIN_EMAIL -u ADMIN_PASSWORD node "$B/wire.mjs" & )
 ( env -u ADMIN_EMAIL -u ADMIN_PASSWORD node "$B/memory-sync.mjs" & )
 
 # Agents inherit Paperclip's environment: they don't need the admin login.

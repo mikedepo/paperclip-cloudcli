@@ -5,6 +5,8 @@
 // 2. The instruction layer, rewritten every time so template updates reach existing installs (layer.mjs).
 // 3. Connects the skill and the /setup page to Paperclip: signs in with the login and creates a board API key named
 //    "CloudCLI scheduled-jobs" (kept in ~/.config/scheduled-jobs/paperclip.json, mode 600), unless the stored one works.
+//    So the password is needed only for the first key: once the user deletes it in Railway, the stored key is used,
+//    and only a key Paperclip refuses asks for the password again.
 //    Stores Paperclip's public address as Paperclip reports it (its OAuth issuer), else PAPERCLIP_PUBLIC_URL; the setup
 //    page (front.mjs) keeps it current every 5 minutes.
 import fs from 'node:fs';
@@ -17,6 +19,7 @@ import {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const KEY_NAME = 'CloudCLI scheduled-jobs';
+const NEEDS_PASSWORD = "set ADMIN_PASSWORD in Paperclip's Variables, then redeploy Paperclip and CloudCLI";
 const paperclipUrl = (process.env.PAPERCLIP_URL || '').replace(/\/+$/, '');
 const envPublicUrl = (process.env.PAPERCLIP_PUBLIC_URL || '').replace(/\/+$/, '');
 const [email = '', password = ''] = fs.readFileSync(0, 'utf8').split('\n');
@@ -48,12 +51,18 @@ async function connect() {
   };
   for (let i = 0; i < 60; i++) {
     try {
-      if (saved.token && (await call('GET', '/api/companies', { token: saved.token })).ok) {
-        await save({});
-        log('the scheduled-jobs skill is connected to Paperclip (stored key works)');
-        return;
+      if (saved.token) {
+        const k = await call('GET', '/api/companies', { token: saved.token });
+        if (k.ok) {
+          await save({});
+          log('the scheduled-jobs skill is connected to Paperclip (stored key works)');
+          return;
+        }
+        // Without a password, only a key Paperclip refuses needs one again; anything else is Paperclip starting.
+        if (!password && ![401, 403].includes(k.status)) throw new Error(`Paperclip answered ${k.status}`);
+        if (!password) { log(`Paperclip refused the scheduled-jobs skill's stored key, and there is no password to make a new one: ${NEEDS_PASSWORD}`); return; }
       }
-      if (!email || !password) { log('no login to connect with; the scheduled-jobs skill is not connected'); return; }
+      if (!email || !password) { log(`no password to connect the scheduled-jobs skill to Paperclip with: ${NEEDS_PASSWORD}`); return; }
       const si = await call('POST', '/api/auth/sign-in/email', { body: { email: email.trim().toLowerCase(), password } });
       if (si.status === 401) { log('signing in to Paperclip with the login failed (401); the scheduled-jobs skill is not connected. Redeploy after fixing the login.'); return; }
       if (!si.ok) throw new Error(`sign-in ${si.status}`);

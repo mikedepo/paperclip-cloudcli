@@ -154,6 +154,12 @@
       <div id="domReport"></div>
     </section>
 
+    <section class="card hidden" id="pwCard">
+      <h2>Your password</h2>
+      <p>It was needed only at the first start: both apps now keep just a hash of it. You can delete <code>ADMIN_PASSWORD</code> from the Paperclip service's Variables in Railway, or seal it there (its &#8942; menu, Seal).</p>
+      <p class="small">To change your password later, set <code>ADMIN_PASSWORD</code> there again, then redeploy Paperclip, then CloudCLI.</p>
+    </section>
+
     <section class="card" id="doneCard">
       <h2>What next</h2>
       <p>Tell Claude in CloudCLI what should be done and when, in plain words. Claude writes the job's instructions into your repo, schedules it in Paperclip and runs it once to check. Paperclip then runs it on time; every run's status, transcript and usage are on its dashboard, with the same login.</p>
@@ -227,6 +233,7 @@ function render(s) {
     $('mcpCard').classList.remove('hidden');
   }
   renderDomains(s.domains);
+  $('pwCard').classList.toggle('hidden', !s.done);
   // The browser's zone is saved without a click; Save is only for another zone.
   const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   if (!s.timezone.chosen && browserZone && !zoneSaved) { zoneSaved = true; call('timezone', { timezone: browserZone }).then(render).catch(() => {}); }

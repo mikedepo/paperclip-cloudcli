@@ -1,8 +1,11 @@
 // AvgSoft's Paperclip + CloudCLI template: the wiring on the Paperclip service, run in the background at every start.
 // 1. Clones REPO_URL into /paperclip/repos/<name> (once) and, when the repo has .claude/memory/, points Claude Code's
 //    auto memory at it in the clone's .claude/settings.local.json (memory-sync.mjs keeps the machine-wide setting).
-// 2. Signs in as the admin from the deploy form. When ADMIN_PASSWORD changed in Variables, sets it as the account's
-//    password (checked by signing in; put back if that fails) and signs every browser out, as CloudCLI does.
+// 2. Signs in as the admin from the deploy form (the login comes on stdin, never in the environment). When
+//    ADMIN_PASSWORD changed in Variables, sets it as the account's password (checked by signing in; put back if that
+//    fails) and signs every browser out, as CloudCLI does. Then makes sure its own board API key exists (in
+//    /paperclip/.bundle/wiring.json, mode 600) and works with it. With ADMIN_PASSWORD empty, as it can be after the
+//    first start (the user deletes or seals it in Railway), the stored key does it all.
 // 3. Makes sure the company "Jobs", a project for REPO_URL's repo (one project per repo, as CloudCLI's /setup adds
 //    them) and the "Runner" agent exist, keeps the Runner on the repo and its instructions current, and stores
 //    GH_TOKEN as the company secret GITHUB_TOKEN. Never renames a project or changes one that holds another repo.
@@ -36,6 +39,10 @@ const CODEX = 'Codex';
 const SCHEDULER = 'Scheduler';
 const SCHEDULER_MJS = new URL('./scheduler.mjs', import.meta.url).pathname;
 const JOBS_CONFIG = path.join(HOME, '.bundle', 'scheduled-jobs.json');
+// The wiring's own board API key: what lets every start after the first run without ADMIN_PASSWORD.
+const WIRING_KEY = path.join(HOME, '.bundle', 'wiring.json');
+const WIRING_KEY_NAME = 'Template wiring (Paperclip start)';
+const NEEDS_PASSWORD = "set ADMIN_PASSWORD in Paperclip's Variables and redeploy";
 const MANUAL = 'https://docs-production-3003.up.railway.app';
 // What an assistant connected through Paperclip's MCP server reads about each agent (paperclip_list_agents returns
 // the capabilities): how to manage jobs, and our conventions for them.
@@ -52,8 +59,11 @@ const MCP_PATH = '/mcp/paperclip'; // Paperclip's MCP endpoint (PUBLIC_MCP_PATH)
 const base = `http://127.0.0.1:${process.env.PORT || 3100}`;
 const publicUrl = (process.env.PAPERCLIP_PUBLIC_URL || '').trim().replace(/\/+$/, '');
 const origin = publicUrl.startsWith('http') ? new URL(publicUrl).origin : base;
-const email = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
-const password = process.env.ADMIN_PASSWORD || '';
+// The login, on stdin from node-start.sh: the email, a newline, the password (either may be empty).
+const login = (() => { try { return fs.readFileSync(0, 'utf8'); } catch { return ''; } })();
+const cut = login.indexOf('\n');
+const email = (cut < 0 ? login : login.slice(0, cut)).trim().toLowerCase();
+const password = cut < 0 ? '' : login.slice(cut + 1);
 const ghToken = (process.env.GH_TOKEN || '').trim();
 
 // ---- repo and shared memory ----
@@ -127,11 +137,14 @@ const sameRepo = (a, b) => !!repoKey(a) && repoKey(a) === repoKey(b);
 
 // ---- Paperclip API, as the admin ----
 
+// A session cookie while signing in with the password, then the wiring's own board API key (same rights).
 let cookie = '';
+let bearer = '';
 async function call(method, p, body) {
   const headers = { origin, accept: 'application/json' };
   if (body !== undefined) headers['content-type'] = 'application/json';
-  if (cookie) headers.cookie = cookie;
+  if (bearer) headers.authorization = `Bearer ${bearer}`;
+  else if (cookie) headers.cookie = cookie;
   const res = await fetch(base + p, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   const text = await res.text();
   let json = null;
@@ -173,6 +186,64 @@ async function syncPassword() {
   } finally {
     await sql.end({ timeout: 5 });
   }
+}
+
+const readJson = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; } };
+function writePrivate(file, data) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+}
+
+// 'ok', 'refused' (revoked, or another Paperclip's), or the status Paperclip answered.
+async function keyStatus(token) {
+  try {
+    const r = await fetch(`${base}/api/companies`, { headers: { authorization: `Bearer ${token}`, accept: 'application/json' } });
+    return r.ok ? 'ok' : [401, 403].includes(r.status) ? 'refused' : `status ${r.status}`;
+  } catch (e) { return e.cause?.code || e.message; }
+}
+
+// Signed in with the password: keeps the stored key while it works, else creates one (the old one revoked).
+async function ensureWiringKey(saved) {
+  if (saved.token && (await keyStatus(saved.token)) === 'ok') return saved.token;
+  const r = await call('POST', '/api/board-api-keys', { name: WIRING_KEY_NAME, expiresAt: null });
+  if (!r.ok || !r.json?.token) { log(`creating the wiring's API key failed (${r.status}); later starts still need ADMIN_PASSWORD`); return null; }
+  if (saved.keyId && saved.keyId !== r.json.id) await call('DELETE', `/api/board-api-keys/${saved.keyId}`).catch(() => {});
+  writePrivate(WIRING_KEY, { keyId: r.json.id, token: r.json.token });
+  log(`stored the wiring's board API key ("${WIRING_KEY_NAME}"): later starts don't need ADMIN_PASSWORD`);
+  return r.json.token;
+}
+
+// Signs in with the password when there is one (changing the account's password when it changed in Variables),
+// then works with the wiring's own key; without a password, with the stored key alone. False: nothing to wire with.
+async function authenticate() {
+  const saved = readJson(WIRING_KEY);
+  let problem = '';
+  if (password && email) {
+    const r = await signIn();
+    if (r.status === 401) problem = await syncPassword().then((p) => p && `signing in as ADMIN_EMAIL failed and ${p}`).catch((e) => `signing in as ADMIN_EMAIL failed and could not update the password: ${e.message}`);
+    else if (!r.ok) problem = `signing in as ADMIN_EMAIL failed (${r.status})`;
+    if (!problem) {
+      const token = await ensureWiringKey(saved);
+      if (token) {
+        await call('POST', '/api/auth/sign-out', {}).catch(() => {});
+        cookie = '';
+        bearer = token;
+      }
+      return true;
+    }
+  } else if (password) problem = 'ADMIN_EMAIL is empty';
+  const status = saved.token ? await keyStatus(saved.token) : 'missing';
+  if (status === 'ok') {
+    bearer = saved.token;
+    log(problem ? `${problem}; the wiring uses its stored API key` : 'ADMIN_PASSWORD is empty, as it can be after the first start: the wiring uses its stored API key');
+    return true;
+  }
+  if (problem) log(`${problem}. Nothing else wired. Fix it in Paperclip's Variables and redeploy.`);
+  else if (status === 'missing') log(`ADMIN_PASSWORD is empty and the wiring has no stored API key yet: ${NEEDS_PASSWORD}. Nothing wired.`);
+  else if (status === 'refused') log(`ADMIN_PASSWORD is empty and Paperclip refused the wiring's stored API key: ${NEEDS_PASSWORD}. Nothing wired.`);
+  else log(`checking the wiring's stored API key failed (${status}); nothing wired. Redeploy to retry.`);
+  return false;
 }
 
 async function ensureCompany(state) {
@@ -504,15 +575,7 @@ async function main() {
   const cwd = usable ? usable.dir : path.join(HOME, 'workspace');
   fs.mkdirSync(cwd, { recursive: true });
 
-  if (!email || !password) { log('ADMIN_EMAIL or ADMIN_PASSWORD is empty; the company and the Runner agent were not set up.'); return; }
-  let r = await signIn();
-  if (r.status === 401) {
-    const problem = await syncPassword().catch((e) => `could not update it: ${e.message}`);
-    if (problem) { log(`signing in as ADMIN_EMAIL failed and ${problem}. Nothing else wired.`); return; }
-  } else if (!r.ok) {
-    log(`signing in as ADMIN_EMAIL failed (${r.status}); nothing else wired. Redeploy to retry.`);
-    return;
-  }
+  if (!(await authenticate())) return;
 
   const company = await ensureCompany(state);
   state.companyId = company.id;

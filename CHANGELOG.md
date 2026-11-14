@@ -2,6 +2,12 @@
 
 Each entry is an update Railway offers to existing deployments of the template. Updates are opt-in: nothing changes until you apply one, and your data is kept (see the README).
 
+## 2026-11-14 (4)
+
+- Your password no longer has to stay in Railway. Both apps need `ADMIN_PASSWORD` only at their first start, to create your account, and keep just a hash of it. Once setup is done, you can delete it from the Paperclip service's variables, or seal it there (Railway then hides its value for good), and sign in as before. To change your password later, set `ADMIN_PASSWORD` again and redeploy Paperclip, then CloudCLI, as before. The setup page says so once setup is finished.
+- On an existing server: apply this update with `ADMIN_PASSWORD` still set, and remove it only after Paperclip has started once on the update. That start creates the key the template uses from then on instead of your password.
+- Paperclip's start no longer passes your password to the template's own setup through its environment, where processes of the same user could read it for a moment at each start.
+
 ## 2026-11-14 (3)
 
 - README only, nothing to apply.
