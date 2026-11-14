@@ -2,6 +2,10 @@
 
 Each entry is an update Railway offers to existing deployments of the template. Updates are opt-in: nothing changes until you apply one, and your data is kept (see the README).
 
+## 2026-11-14 (3)
+
+- README only, nothing to apply.
+
 ## 2026-11-14 (2)
 
 - Put CloudCLI and Paperclip on domains of your own, such as `cloudcli.example.com`. The setup page's new "Optional: your own domains" card gives the Railway steps for each app with the right port, then checks the DNS record and HTTPS and says what is still missing. A CloudCLI domain is used as soon as it works; Paperclip takes its new domain at its next start (redeploy it in Railway once the DNS record works). Nothing else to change: no variables to edit.
