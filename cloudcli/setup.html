@@ -36,6 +36,18 @@
   a.btnlink { display: inline-flex; align-items: center; padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); text-decoration: none; word-break: normal; }
   .example { color: var(--text); background: #0b0d11; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; cursor: copy; }
   .example.copied { border-color: var(--ok); }
+  .field { flex: 1 1 220px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--sub); }
+  .dom { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 10px; }
+  .dom h3 { font-size: 15px; margin: 0 0 4px; }
+  .dom ol { margin: 4px 0 8px; padding-left: 20px; color: var(--sub); }
+  .dom li { margin: 3px 0; }
+  .chk { margin: 3px 0; }
+  .chk.ok { color: var(--ok); }
+  .chk.bad { color: var(--bad); }
+  .chk.wait { color: var(--sub); }
+  .warn { color: var(--text); border-left: 3px solid #fbbf24; padding-left: 10px; }
+  label.check { display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; font-size: 13px; color: var(--text); cursor: pointer; }
+  label.check input { width: auto; flex: none; margin: 3px 0 0; }
 </style>
 </head>
 <body>
@@ -71,7 +83,7 @@
   <div id="steps" class="hidden">
     <section class="card">
       <h2>1. Claude, Codex, or both <span class="pills"><span class="pill" id="claudePill">Claude</span><span class="pill" id="codexPill">Codex</span></span></h2>
-      <p>The AI that writes your jobs in CloudCLI's chat and runs them in Paperclip. Either one is enough; with both, jobs run with Claude unless you ask for Codex.</p>
+      <p>The AI that runs your jobs in Paperclip, and that you ask for jobs in CloudCLI's chat. Either one is enough for jobs; with both, jobs run with Claude unless you ask for Codex.</p>
       <h3>Claude</h3>
       <p>Runs Claude Code's own <code>claude setup-token</code> on your server. Open the link, sign in to your Claude account, and paste the code it shows back here. The token stays on your server: Claude Code in CloudCLI and Paperclip's Runner agent use it.</p>
       <div class="row"><button id="claudeStart">Start</button></div>
@@ -82,22 +94,33 @@
       </div>
       <p class="err" id="claudeErr"></p>
       <h3 class="sub">Codex</h3>
-      <p>OpenAI's Codex, on your ChatGPT plan. It takes two one-time codes in a row: one for Paperclip's Codex agent, which runs jobs, then one for Codex in CloudCLI's chats. One sign-in can't serve both, since each would sign the other out. Chats need ChatGPT Plus or higher: on a free plan ChatGPT refuses the models CloudCLI offers, while jobs work.</p>
+      <p>OpenAI's Codex, on your ChatGPT plan, for jobs: Paperclip signs Codex in on your server with a one-time code and adds a "Codex" agent. It runs the jobs given to it, or every job when Claude isn't connected.</p>
       <p class="small">First, in ChatGPT: Settings, Security and login, turn on "Enable device code sign-in for Codex" (near the bottom).</p>
       <div class="row"><button id="codexStart">Start</button></div>
       <div id="codexCodeBox" class="hidden">
-        <p>Code 1 of 2, for jobs: open <a id="codexUrl" target="_blank" rel="noopener" href="https://auth.openai.com/codex/device">auth.openai.com/codex/device</a>, sign in to ChatGPT and enter:</p>
+        <p>Open <a id="codexUrl" target="_blank" rel="noopener" href="https://auth.openai.com/codex/device">auth.openai.com/codex/device</a>, sign in to ChatGPT and enter:</p>
         <p class="code" id="codexCode"></p>
-        <p class="small">This page updates once ChatGPT confirms, then shows the second code.</p>
+        <p class="small">This page updates once ChatGPT confirms.</p>
       </div>
       <p class="err" id="codexErr"></p>
+      <h3>Codex chats in CloudCLI <span class="pill" id="codexChatsPill">off</span></h3>
+      <p class="warn"><strong>Off unless you turn them on: Codex chats here run without permission prompts.</strong> Codex's sandbox can't start on Railway, so its chats work only in CloudCLI's Bypass Permissions mode, where Codex runs commands and edits files without asking you first. It is told to ask in the chat before anything destructive, but nothing enforces that. Claude chats still ask.</p>
+      <p class="small">Codex chats need ChatGPT Plus or higher: on a free plan ChatGPT refuses the models CloudCLI offers, while jobs work. They take their own one-time code, since one ChatGPT sign-in can't serve both Paperclip and CloudCLI.</p>
+      <div id="codexChatsAsk">
+        <p class="small hidden" id="codexChatsSigned">Codex is already signed in on CloudCLI, so turning chats on takes no code.</p>
+        <label class="check"><input type="checkbox" id="codexChatsOk"> I understand: in Codex chats, Codex runs commands and edits files without asking me.</label>
+        <div class="row"><button class="ghost" id="codexChatsEnable">Turn on Codex chats</button></div>
+      </div>
       <div id="codexHereBox" class="hidden">
-        <p>Code 2 of 2, for CloudCLI's chats: open <a id="codexHereUrl" target="_blank" rel="noopener" href="https://auth.openai.com/codex/device">auth.openai.com/codex/device</a> again and enter:</p>
+        <p>Code for Codex chats: open <a id="codexHereUrl" target="_blank" rel="noopener" href="https://auth.openai.com/codex/device">auth.openai.com/codex/device</a> again and enter:</p>
         <p class="code" id="codexHereCode"></p>
       </div>
       <p class="err" id="codexHereErr"></p>
-      <p class="small" id="codexHereLine"><span id="codexHereText">Codex in CloudCLI's chats signs in with its own code.</span> <button class="ghost small" id="codexHereStart">Sign in for chats</button></p>
-      <p class="small hidden" id="codexMode">Codex chats here use CloudCLI's Bypass Permissions mode, which this page selects in this browser: Codex's sandbox can't start on Railway, so in the other modes Codex can't run commands or edit files. In that mode Codex doesn't ask before it acts.</p>
+      <div id="codexChatsOnBox" class="hidden">
+        <p class="small" id="codexChatsText"></p>
+        <div class="row"><button class="ghost small" id="codexHereStart">Sign in</button><button class="ghost small" id="codexChatsDisable">Turn off</button></div>
+        <p class="small">Turn off signs Codex out of CloudCLI, its chats and terminal. Codex jobs keep running.</p>
+      </div>
     </section>
 
     <section class="card">
@@ -129,6 +152,30 @@
       <p class="err" id="tzErr"></p>
     </section>
 
+    <section class="card hidden" id="mcpCard">
+      <h2>Optional: from your computer</h2>
+      <p>An assistant on your own computer (Claude Code, Codex and others) can list, create and change your jobs through Paperclip's MCP server. It needs only this address and a sign-in in your browser with the same login.</p>
+      <p class="small">MCP server: <code id="mcpUrl"></code></p>
+      <p class="small">For Claude Code, run this (click to copy), then <code>/mcp</code> in Claude Code, choose paperclip and Authenticate:</p>
+      <p class="example" id="mcpCommand" title="Click to copy"></p>
+      <p class="small">Other assistants: <a id="mcpSetup" target="_blank" rel="noopener">Paperclip's setup instructions</a>.</p>
+    </section>
+
+    <section class="card" id="domainCard">
+      <h2>Optional: your own domains <span class="pill" id="domPill">Railway addresses</span></h2>
+      <p>Put CloudCLI and Paperclip on addresses of your own, such as cloudcli.example.com. Their Railway addresses keep working.</p>
+      <div class="row"><label class="field">CloudCLI<input id="domCloudcli" placeholder="cloudcli.example.com" autocomplete="off"></label><label class="field">Paperclip<input id="domPaperclip" placeholder="paperclip.example.com" autocomplete="off"></label></div>
+      <div class="row"><button id="domSave">Save and check</button><button class="ghost hidden" id="domCheck">Check again</button></div>
+      <p class="err" id="domErr"></p>
+      <div id="domReport"></div>
+    </section>
+
+    <section class="card hidden" id="pwCard">
+      <h2>Your password</h2>
+      <p>It was needed only at the first start: both apps now keep just a hash of it. You can delete <code>ADMIN_PASSWORD</code> from the Paperclip service's Variables in Railway, or seal it there (its &#8942; menu, Seal).</p>
+      <p class="small">To change your password later, set <code>ADMIN_PASSWORD</code> there again, then redeploy Paperclip, then CloudCLI.</p>
+    </section>
+
     <section class="card" id="doneCard">
       <h2>What next</h2>
       <p>Tell Claude or Codex in CloudCLI what should be done and when, in plain words. It writes the job's instructions into your repo, schedules it in Paperclip and runs it once to check. Paperclip then runs it on time; every run's status, transcript and usage are on its dashboard, with the same login.</p>
@@ -136,6 +183,7 @@
       <p class="example" title="Click to copy">Every weekday at 8:00, list the open issues in my repo with a one-line summary each.</p>
       <p class="example" title="Click to copy">Every Monday at 9:00, summarize last week's commits in my repo.</p>
       <p class="small">Jobs run once Claude or Codex is connected (step 1).</p>
+      <p class="small hidden" id="noChat">Codex runs your jobs, but CloudCLI's chat has no assistant to ask for them yet: connect Claude, or turn on Codex chats (step 1). An assistant on your own computer can also create them (Optional: from your computer).</p>
       <div class="row"><button id="finish">Finish and open CloudCLI</button><a id="pcLink" class="btnlink hidden" target="_blank" rel="noopener">Open Paperclip</a></div>
       <p class="err" id="finishErr"></p>
     </section>
@@ -183,31 +231,51 @@ function render(s) {
     pills.appendChild(p);
   }
   const cx = s.codex;
-  pill('codexPill', 'Codex: ' + (cx.done && cx.here.done ? 'connected' : cx.status === 'saving' ? 'saving' : cx.done ? 'jobs only' : cx.here.done ? 'chats only' : 'not connected'), cx.done);
+  const chatsOn = cx.chats && cx.here.done;
+  pill('codexPill', 'Codex: ' + (cx.status === 'saving' ? 'saving' : cx.done && chatsOn ? 'jobs and chats' : cx.done ? 'jobs' : chatsOn ? 'chats only' : 'not connected'), cx.done);
   $('codexCodeBox').classList.toggle('hidden', !cx.code);
   if (cx.code) { $('codexCode').textContent = cx.code; if (cx.url) $('codexUrl').href = cx.url; }
   $('codexErr').textContent = cx.status === 'error' ? (cx.error || '') : '';
   $('codexStart').textContent = cx.done ? 'Redo' : 'Start';
+  // Codex chats: off unless turned on here, with the box ticked (they run without permission prompts).
+  const jobsCodeWaits = ['starting', 'waiting-user', 'saving'].includes(cx.status);
+  pill('codexChatsPill', chatsOn ? 'on' : cx.chats ? 'turning on' : 'off', chatsOn);
+  $('codexChatsAsk').classList.toggle('hidden', cx.chats);
+  $('codexChatsSigned').classList.toggle('hidden', !cx.here.done);
   $('codexHereBox').classList.toggle('hidden', !cx.here.code);
   if (cx.here.code) { $('codexHereCode').textContent = cx.here.code; if (cx.here.url) $('codexHereUrl').href = cx.here.url; }
   $('codexHereErr').textContent = cx.here.status === 'error' ? (cx.here.error || '') : '';
-  $('codexHereLine').classList.toggle('hidden', !!cx.here.code);
-  $('codexHereText').textContent = cx.here.done ? 'Codex is signed in for CloudCLI\'s chats.' : 'Codex in CloudCLI\'s chats signs in with its own code.';
-  $('codexHereStart').textContent = cx.here.done ? 'Sign in again' : 'Sign in for chats';
-  $('codexMode').classList.toggle('hidden', !cx.here.done);
-  // CloudCLI keeps each browser's last permission mode per assistant here. Set once per browser, so a mode the user
-  // picks later is kept.
-  if (cx.here.done) {
-    try {
-      if (!localStorage.getItem('paperclip-cloudcli-codex-mode')) {
-        localStorage.setItem('permissionMode-last-codex', 'bypassPermissions');
-        localStorage.setItem('paperclip-cloudcli-codex-mode', 'bypassPermissions');
-      }
-    } catch (e) {}
-  }
+  $('codexChatsOnBox').classList.toggle('hidden', !cx.chats || !!cx.here.code);
+  $('codexChatsText').textContent = chatsOn
+    ? 'On. This page selected Bypass Permissions for Codex in this browser; in another browser, pick it with the mode button under the message box.'
+    : jobsCodeWaits ? 'On: their code follows the code for jobs, once ChatGPT confirms it.' : 'On, but Codex isn\'t signed in on CloudCLI yet: press Sign in for its code.';
+  $('codexHereStart').textContent = cx.here.done ? 'Sign in again' : 'Sign in';
+  $('codexHereStart').classList.toggle('hidden', !chatsOn && jobsCodeWaits);
+  // CloudCLI keeps each browser's last permission mode per assistant in localStorage. Bypass Permissions is selected
+  // once per browser after Codex chats are turned on, so a mode the user picks later is kept; turned off, the mode
+  // this page selected is undone.
+  try {
+    if (chatsOn && !localStorage.getItem('paperclip-cloudcli-codex-mode')) {
+      localStorage.setItem('permissionMode-last-codex', 'bypassPermissions');
+      localStorage.setItem('paperclip-cloudcli-codex-mode', 'bypassPermissions');
+    } else if (!cx.chats && localStorage.getItem('paperclip-cloudcli-codex-mode')) {
+      if (localStorage.getItem('permissionMode-last-codex') === 'bypassPermissions') localStorage.removeItem('permissionMode-last-codex');
+      localStorage.removeItem('paperclip-cloudcli-codex-mode');
+    }
+  } catch (e) {}
+  // Codex runs the jobs, but no chat can ask for them yet.
+  $('noChat').classList.toggle('hidden', !(cx.done && !s.claude.done && !s.claude.cloudcliSignedIn && !chatsOn));
   pill('tzPill', s.timezone.value, s.timezone.chosen);
   if (!$('tzInput').value) $('tzInput').value = s.timezone.chosen ? s.timezone.value : (Intl.DateTimeFormat().resolvedOptions().timeZone || s.timezone.value);
   if (s.links.paperclip) { $('pcLink').href = s.links.paperclip; $('pcLink').classList.remove('hidden'); }
+  if (s.links.mcp) {
+    $('mcpUrl').textContent = s.links.mcp;
+    $('mcpCommand').textContent = s.links.mcpCommand;
+    $('mcpSetup').href = s.links.mcpSetup;
+    $('mcpCard').classList.remove('hidden');
+  }
+  renderDomains(s.domains);
+  $('pwCard').classList.toggle('hidden', !s.done);
   // The browser's zone is saved without a click; Save is only for another zone.
   const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   if (!s.timezone.chosen && browserZone && !zoneSaved) { zoneSaved = true; call('timezone', { timezone: browserZone }).then(render).catch(() => {}); }
@@ -218,6 +286,55 @@ function render(s) {
   if (!busy && polling) { clearInterval(polling); polling = null; }
 }
 async function refresh() { try { render(await call('state')); } catch (e) {} }
+
+// ---------- Optional: your own domains ----------
+let domChecks = null, domFilled = false, domAuto = false;
+const NAMES = { cloudcli: 'CloudCLI', paperclip: 'Paperclip' };
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; }
+function chk(box, state, text) { box.appendChild(el('p', 'chk small ' + state, (state === 'ok' ? '\u2713 ' : state === 'bad' ? '\u2717 ' : '') + text)); }
+function renderDomains(d) {
+  if (!d) return;
+  if (!domFilled) { $('domCloudcli').value = d.cloudcli; $('domPaperclip').value = d.paperclip; domFilled = true; }
+  const saved = ['cloudcli', 'paperclip'].filter((a) => d[a]);
+  $('domCheck').classList.toggle('hidden', !saved.length);
+  if (saved.length && !domChecks && !domAuto) { domAuto = true; $('domCheck').click(); }
+  const box = $('domReport'); box.textContent = '';
+  let inUse = 0;
+  for (const app of saved) {
+    const host = d[app], c = domChecks && domChecks[app] && domChecks[app].host === host ? domChecks[app] : null;
+    const name = NAMES[app];
+    const part = el('div', 'dom');
+    part.appendChild(el('h3', '', name + ': ' + host));
+    const ol = el('ol', 'small');
+    ol.appendChild(el('li', '', 'In Railway, open the ' + name + ' service, then Settings. Under Networking, press Custom Domain.'));
+    ol.appendChild(el('li', '', 'Enter ' + host + ', choose port ' + d.ports[app] + (app === 'cloudcli' && d.ports.inner ? ' (not ' + d.ports.inner + ')' : '') + ', and press Add Domain.'));
+    ol.appendChild(el('li', '', 'At your domain\'s DNS provider, add the records Railway shows. Railway then issues the HTTPS certificate, usually within minutes.'));
+    if (app === 'paperclip' && !(c && c.inUse)) ol.appendChild(el('li', '', 'Once the DNS record works (checked below), redeploy Paperclip in Railway (Deployments, the latest one\'s \u22ee menu, Redeploy). It takes the new address at its start.'));
+    part.appendChild(ol);
+    if (!c) { chk(part, 'wait', 'Checking\u2026'); box.appendChild(part); continue; }
+    chk(part, c.dns.ok ? 'ok' : 'bad', c.dns.elsewhere ? 'DNS: points to ' + c.dns.target + ', not to the record Railway shows' : c.dns.ok ? 'DNS: points to ' + c.dns.target : 'DNS: no record yet');
+    chk(part, c.https.ok ? 'ok' : c.https.redeploy || c.https.wait ? 'wait' : 'bad', c.https.ok ? 'HTTPS: reaches your ' + name : 'HTTPS: ' + c.https.why);
+    if (app === 'cloudcli') {
+      chk(part, c.inUse ? 'ok' : 'wait', c.inUse ? 'In use: links and Claude\'s instructions use it now.' : 'CloudCLI uses its Railway address until this works.');
+    } else if (c.inUse) {
+      chk(part, c.https.ok ? 'ok' : 'bad', 'Paperclip uses it' + (c.https.ok ? ': links, the MCP address and Claude\'s instructions point to it.' : ', but it isn\'t reachable yet: add the DNS record.'));
+    } else {
+      chk(part, 'bad', 'Paperclip still uses ' + (c.current || 'its Railway address') + '. ' + (c.dns.ok ? 'Redeploy Paperclip in Railway, then press Check again.' : 'Redeploy it once the DNS record works.'));
+    }
+    if (c.inUse && (app === 'cloudcli' || c.https.ok)) inUse++;
+    box.appendChild(part);
+  }
+  if (saved.length) {
+    box.appendChild(el('p', 'small', 'Sign in once on each new address: your sign-in is kept per address. The Railway addresses keep working.'));
+    if (d.paperclip) {
+      const p = el('p', 'small', 'Assistants connected from your computer with the old Paperclip address stop working once Paperclip uses the new one. Add them again: ');
+      p.appendChild(el('code', '', 'claude mcp remove paperclip'));
+      p.appendChild(document.createTextNode(', then the command in "Optional: from your computer".'));
+      box.appendChild(p);
+    }
+  }
+  pill('domPill', saved.length ? (inUse === saved.length ? 'in use' : inUse + ' of ' + saved.length + ' in use') : 'Railway addresses', saved.length && inUse === saved.length);
+}
 // busy: what the button says while its step runs, so a slow start doesn't look frozen.
 function act(btn, errId, fn, busy) {
   $(btn).onclick = async () => {
@@ -254,9 +371,19 @@ act('repoUse', 'repoErr', async () => {
   $('repoMsg').textContent = (r.cloned ? 'Cloned into ' : 'In ') + r.dir + (r.memory ? ', with its .claude/memory/ as Claude\'s memory' : '') + '. ' + r.paperclip + '.';
   render(r.state);
 }, 'Cloning…');
+act('domSave', 'domErr', async () => {
+  const r = await call('domains', { cloudcli: $('domCloudcli').value, paperclip: $('domPaperclip').value });
+  domChecks = r.checks; render(r.state);
+}, 'Checking\u2026');
+act('domCheck', 'domErr', async () => { const r = await call('domains/check', {}); domChecks = r.checks; render(r.state); }, 'Checking\u2026');
 act('tzSave', 'tzErr', async () => render(await call('timezone', { timezone: $('tzInput').value.trim() })));
 act('codexStart', 'codexErr', async () => render(await call('codex/start', {})), 'Asking Paperclip for a code…');
 act('codexHereStart', 'codexHereErr', async () => render(await call('codex/here', {})), 'Starting Codex…');
+act('codexChatsEnable', 'codexHereErr', async () => {
+  if (!$('codexChatsOk').checked) throw new Error('Tick the box first: Codex chats run without permission prompts.');
+  render(await call('codex/chats', { on: true, accept: true }));
+}, 'Turning on…');
+act('codexChatsDisable', 'codexHereErr', async () => { render(await call('codex/chats', { on: false })); $('codexChatsOk').checked = false; }, 'Turning off…');
 let finishWarned = false;
 act('finish', 'finishErr', async () => {
   const s = await call('state');

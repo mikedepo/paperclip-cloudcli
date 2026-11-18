@@ -1,12 +1,19 @@
 // AvgSoft's Paperclip + CloudCLI template: the wiring on the Paperclip service, run in the background at every start.
 // 1. Clones REPO_URL into /paperclip/repos/<name> (once) and, when the repo has .claude/memory/, points Claude Code's
 //    auto memory at it in the clone's .claude/settings.local.json (memory-sync.mjs keeps the machine-wide setting).
-// 2. Signs in as the admin from the deploy form. When ADMIN_PASSWORD changed in Variables, sets it as the account's
-//    password (checked by signing in; put back if that fails) and signs every browser out, as CloudCLI does.
+// 2. Signs in as the admin from the deploy form (the login comes on stdin, never in the environment). When
+//    ADMIN_PASSWORD changed in Variables, sets it as the account's password (checked by signing in; put back if that
+//    fails) and signs every browser out, as CloudCLI does. Then makes sure its own board API key exists (in
+//    /paperclip/.bundle/wiring.json, mode 600) and works with it. With ADMIN_PASSWORD empty, as it can be after the
+//    first start (the user deletes or seals it in Railway), the stored key does it all.
 // 3. Makes sure the company "Jobs", a project for REPO_URL's repo (one project per repo, as CloudCLI's /setup adds
 //    them) and the "Runner" agent exist, keeps the Runner on the repo and its instructions current, and stores
 //    GH_TOKEN as the company secret GITHUB_TOKEN. Never renames a project or changes one that holds another repo.
 //    The optional "Codex" agent, once CloudCLI's /setup page has created it, is kept the same way (never created here).
+// 4. Turns on Paperclip's MCP server for assistants on people's own computers (the instance setting "Assistant
+//    connections (MCP)", off by default), and keeps the "Scheduler" agent that manages the jobs for them: Paperclip's
+//    MCP has no tools for routines, so an assistant gives the Scheduler a task with a scheduled-jobs command
+//    (scheduler.mjs runs it, no AI). Its board API key is in /paperclip/.bundle/scheduled-jobs.json (mode 600).
 // Idempotent: the IDs it created are kept in /paperclip/.bundle/state.json. Never prints the password or a token.
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -22,13 +29,41 @@ const STATE_FILE = path.join(HOME, '.bundle', 'state.json');
 const RUNNER_MD = fs.readFileSync(new URL('./runner.md', import.meta.url), 'utf8');
 const CODEX_MD = fs.readFileSync(new URL('./codex.md', import.meta.url), 'utf8');
 const COMPANY = 'Jobs';
+// The company's name carries a pointer for assistants connected through Paperclip's MCP server: its first call,
+// paperclip_connection, returns the company's name (not its description), and its tools have nothing named "routine"
+// or "job". A company still called "Jobs" (the template's name before) is renamed; another name the user chose stays.
+const COMPANY_NAME = 'Jobs (routines: give tasks to the Scheduler agent)';
+const COMPANY_ABOUT = "Scheduled jobs (Paperclip routines), run by the Runner agent. To create or change them, give tasks to the Scheduler agent; paperclip_list_agents describes it.";
 const AGENT = 'Runner';
 const CODEX = 'Codex';
+const SCHEDULER = 'Scheduler';
+const SCHEDULER_MJS = new URL('./scheduler.mjs', import.meta.url).pathname;
+const JOBS_CONFIG = path.join(HOME, '.bundle', 'scheduled-jobs.json');
+// The wiring's own board API key: what lets every start after the first run without ADMIN_PASSWORD.
+const WIRING_KEY = path.join(HOME, '.bundle', 'wiring.json');
+const WIRING_KEY_NAME = 'Template wiring (Paperclip start)';
+const NEEDS_PASSWORD = "set ADMIN_PASSWORD in Paperclip's Variables and redeploy";
+const MANUAL = 'https://docs-production-3003.up.railway.app';
+// What an assistant connected through Paperclip's MCP server reads about each agent (paperclip_list_agents returns
+// the capabilities): how to manage jobs, and our conventions for them.
+const RUNNER_ABOUT = 'Runs the repo skill each scheduled job names, then closes its task. Also does one-off requests: a task whose description says what to do once. Jobs are created and changed through the Scheduler agent.';
+const SCHEDULER_ABOUT = [
+  "Manages this server's scheduled jobs (Paperclip routines the Runner agent runs on a schedule). Give it a task (paperclip_create_task, assigneeAgentId: this agent) with one command per line in its description; it runs them at once, with no AI, posts the output as a comment and closes the task (blocked if a command failed). Read it with paperclip_read_task.",
+  "First run `repos`: a job runs a skill from one of the connected repos it lists. The job's repo is the one the user names, else the git remote of the folder you are working in; pass it as --repo. If it isn't one of the connected repos, stop before writing or pushing anything, and tell the user to connect it on step 3 of CloudCLI's /setup page, or offer a connected repo.",
+  'Something to do once ("say hi", "do X now") is not a job: give it to the Runner agent as a task with the request as its description. No skill, no push, no schedule.',
+  'Commands: repos | list | create "<title>" --prompt "Run the <name> skill." --cron "<min hour dom mon dow>" --tz <IANA zone> --repo owner/name [--paused] [--agent Codex] | update "<job>" [--title, --prompt, --cron, --tz, --repo, --agent] | pause, resume or archive "<job>" | run "<job>" | runs "<job>" | log "<job>".',
+  'Rules: one job runs one skill, .claude/skills/<name>/SKILL.md in a connected repo, pushed before the job runs. The prompt is "Run the <name> skill." plus at most one line of arguments. The skill ends by marking its task done with a one-line summary, or blocked with the reason. After creating or changing a job, test it with run, then read log. Jobs never overlap, skip runs missed while the server was down, and are recorded in their repo\'s .claude/jobs.json by the server.',
+  `Guide: ${MANUAL}/connect/mcp/`,
+].join('\n');
+const MCP_PATH = '/mcp/paperclip'; // Paperclip's MCP endpoint (PUBLIC_MCP_PATH); its setup page is /mcp/setup
 const base = `http://127.0.0.1:${process.env.PORT || 3100}`;
 const publicUrl = (process.env.PAPERCLIP_PUBLIC_URL || '').trim().replace(/\/+$/, '');
 const origin = publicUrl.startsWith('http') ? new URL(publicUrl).origin : base;
-const email = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
-const password = process.env.ADMIN_PASSWORD || '';
+// The login, on stdin from node-start.sh: the email, a newline, the password (either may be empty).
+const login = (() => { try { return fs.readFileSync(0, 'utf8'); } catch { return ''; } })();
+const cut = login.indexOf('\n');
+const email = (cut < 0 ? login : login.slice(0, cut)).trim().toLowerCase();
+const password = cut < 0 ? '' : login.slice(cut + 1);
 const ghToken = (process.env.GH_TOKEN || '').trim();
 
 // ---- repo and shared memory ----
@@ -102,11 +137,14 @@ const sameRepo = (a, b) => !!repoKey(a) && repoKey(a) === repoKey(b);
 
 // ---- Paperclip API, as the admin ----
 
+// A session cookie while signing in with the password, then the wiring's own board API key (same rights).
 let cookie = '';
+let bearer = '';
 async function call(method, p, body) {
   const headers = { origin, accept: 'application/json' };
   if (body !== undefined) headers['content-type'] = 'application/json';
-  if (cookie) headers.cookie = cookie;
+  if (bearer) headers.authorization = `Bearer ${bearer}`;
+  else if (cookie) headers.cookie = cookie;
   const res = await fetch(base + p, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   const text = await res.text();
   let json = null;
@@ -150,15 +188,81 @@ async function syncPassword() {
   }
 }
 
+const readJson = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; } };
+function writePrivate(file, data) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+}
+
+// 'ok', 'refused' (revoked, or another Paperclip's), or the status Paperclip answered.
+async function keyStatus(token) {
+  try {
+    const r = await fetch(`${base}/api/companies`, { headers: { authorization: `Bearer ${token}`, accept: 'application/json' } });
+    return r.ok ? 'ok' : [401, 403].includes(r.status) ? 'refused' : `status ${r.status}`;
+  } catch (e) { return e.cause?.code || e.message; }
+}
+
+// Signed in with the password: keeps the stored key while it works, else creates one (the old one revoked).
+async function ensureWiringKey(saved) {
+  if (saved.token && (await keyStatus(saved.token)) === 'ok') return saved.token;
+  const r = await call('POST', '/api/board-api-keys', { name: WIRING_KEY_NAME, expiresAt: null });
+  if (!r.ok || !r.json?.token) { log(`creating the wiring's API key failed (${r.status}); later starts still need ADMIN_PASSWORD`); return null; }
+  if (saved.keyId && saved.keyId !== r.json.id) await call('DELETE', `/api/board-api-keys/${saved.keyId}`).catch(() => {});
+  writePrivate(WIRING_KEY, { keyId: r.json.id, token: r.json.token });
+  log(`stored the wiring's board API key ("${WIRING_KEY_NAME}"): later starts don't need ADMIN_PASSWORD`);
+  return r.json.token;
+}
+
+// Signs in with the password when there is one (changing the account's password when it changed in Variables),
+// then works with the wiring's own key; without a password, with the stored key alone. False: nothing to wire with.
+async function authenticate() {
+  const saved = readJson(WIRING_KEY);
+  let problem = '';
+  if (password && email) {
+    const r = await signIn();
+    if (r.status === 401) problem = await syncPassword().then((p) => p && `signing in as ADMIN_EMAIL failed and ${p}`).catch((e) => `signing in as ADMIN_EMAIL failed and could not update the password: ${e.message}`);
+    else if (!r.ok) problem = `signing in as ADMIN_EMAIL failed (${r.status})`;
+    if (!problem) {
+      const token = await ensureWiringKey(saved);
+      if (token) {
+        await call('POST', '/api/auth/sign-out', {}).catch(() => {});
+        cookie = '';
+        bearer = token;
+      }
+      return true;
+    }
+  } else if (password) problem = 'ADMIN_EMAIL is empty';
+  const status = saved.token ? await keyStatus(saved.token) : 'missing';
+  if (status === 'ok') {
+    bearer = saved.token;
+    log(problem ? `${problem}; the wiring uses its stored API key` : 'ADMIN_PASSWORD is empty, as it can be after the first start: the wiring uses its stored API key');
+    return true;
+  }
+  if (problem) log(`${problem}. Nothing else wired. Fix it in Paperclip's Variables and redeploy.`);
+  else if (status === 'missing') log(`ADMIN_PASSWORD is empty and the wiring has no stored API key yet: ${NEEDS_PASSWORD}. Nothing wired.`);
+  else if (status === 'refused') log(`ADMIN_PASSWORD is empty and Paperclip refused the wiring's stored API key: ${NEEDS_PASSWORD}. Nothing wired.`);
+  else log(`checking the wiring's stored API key failed (${status}); nothing wired. Redeploy to retry.`);
+  return false;
+}
+
 async function ensureCompany(state) {
+  let company = null;
   if (state.companyId) {
     const r = await call('GET', `/api/companies/${state.companyId}`);
-    if (r.ok && r.json?.status !== 'archived') return r.json;
+    if (r.ok && r.json?.status !== 'archived') company = r.json;
   }
-  const found = list(await call('GET', '/api/companies')).find((c) => c.name === COMPANY && c.status !== 'archived');
-  if (found) return found;
-  const company = must(await call('POST', '/api/companies', { name: COMPANY, description: 'Scheduled jobs, run by the Runner agent.' }), 'creating the company');
-  log(`created the company "${COMPANY}"`);
+  company ??= list(await call('GET', '/api/companies')).find((c) => [COMPANY, COMPANY_NAME].includes(c.name) && c.status !== 'archived') || null;
+  if (!company) {
+    // Created as "Jobs" so its tasks are numbered JOB-n, then named with the pointer below.
+    company = must(await call('POST', '/api/companies', { name: COMPANY, description: COMPANY_ABOUT }), 'creating the company');
+    log(`created the company "${COMPANY}"`);
+  }
+  if (company.name === COMPANY) {
+    const r = await call('PATCH', `/api/companies/${company.id}`, { name: COMPANY_NAME, description: COMPANY_ABOUT });
+    if (r.ok) { company = { ...company, ...r.json }; log(`named the company "${COMPANY_NAME}" (assistants read it first)`); }
+    else log(`renaming the company failed (${r.status})`);
+  }
   return company;
 }
 
@@ -227,24 +331,29 @@ async function ensureRunner(company, cwd, state) {
     agent = list(await call('GET', `/api/companies/${company.id}/agents`)).find((a) => a.name === AGENT && a.status !== 'terminated') || null;
   }
   if (!agent) {
-    agent = must(await call('POST', `/api/companies/${company.id}/agents`, {
+    const body = {
       name: AGENT,
       role: 'general',
       title: 'Runs scheduled jobs',
-      capabilities: 'Runs the repo skill each scheduled job names, then closes its task.',
+      capabilities: RUNNER_ABOUT,
       adapterType: 'claude_local',
-      // The CLI engine runs the real claude CLI, which reads CLAUDE_CODE_OAUTH_TOKEN and the repo's settings. Sonnet:
-      // a job follows a written skill, and Opus would draw the subscription's limits down faster (Pro has little of
-      // it). Set only here, so a model the user picks on the Runner's page in Paperclip is kept.
-      adapterConfig: { engine: 'cli', cwd, dangerouslySkipPermissions: true, model: 'sonnet' },
+      // The legacy adapter (the real claude CLI): a new agent on Paperclip's native runner never passes Paperclip's
+      // check in the official image (paperclipai/paperclip#18557). runnerEngine moves it to the native runner once
+      // Paperclip's test of that passes. The token from /setup is bound as CLAUDE_CODE_OAUTH_TOKEN, GitHub as GH_PAT.
+      // Sonnet: a job follows a written skill, and Opus would draw the subscription's limits down faster (Pro has
+      // little of it). Set only here, so a model the user picks on the Runner's page in Paperclip is kept.
+      runner: 'legacy',
+      adapterConfig: { engine: 'cli', cwd, model: 'sonnet', dangerouslySkipPermissions: true },
       // Wakes only for its tasks (each job run), never on a timer.
       runtimeConfig: { heartbeat: { enabled: false, intervalSec: 0, wakeOnDemand: true } },
       instructionsBundle: { entryFile: 'AGENTS.md', files: { 'AGENTS.md': RUNNER_MD } },
-    }), 'creating the Runner agent');
-    log(`created the agent "${AGENT}" (Claude Code, working folder ${cwd})`);
+    };
+    agent = must(await call('POST', `/api/companies/${company.id}/agents`, body), 'creating the Runner agent');
+    log(`created the agent "${AGENT}" (Claude Code on the legacy adapter, working folder ${cwd})`);
     signInHint(agent);
     return agent;
   }
+  agent = await runnerEngine(agent, company, state);
   // Paperclip checks a new Claude agent with a short test run and pauses it when Claude isn't signed in. Retry that
   // check at each start, so a token added later in Variables, or a sign-in made in Paperclip, takes effect.
   if (agent.lifecycleError) {
@@ -256,8 +365,152 @@ async function ensureRunner(company, cwd, state) {
     must(await call('PATCH', `/api/agents/${agent.id}`, { adapterConfig: { cwd } }), 'moving the Runner to the repo');
     log(`the Runner's working folder is now ${cwd}`);
   }
+  if (agent.capabilities !== RUNNER_ABOUT) await call('PATCH', `/api/agents/${agent.id}`, { capabilities: RUNNER_ABOUT });
   await keepInstructions(agent, RUNNER_MD, AGENT);
   return agent;
+}
+
+// ---- assistants on people's own computers: Paperclip's MCP server, and the Scheduler agent ----
+
+// Paperclip's MCP server is the experimental instance setting "Assistant connections (MCP)", off by default; it is
+// turned on at every start. It needs PAPERCLIP_PUBLIC_URL (https), which the template sets.
+async function enableMcp() {
+  const cur = await call('GET', '/api/instance/settings/experimental');
+  if (!(cur.ok && cur.json?.enablePublicMcp === true)) {
+    const r = await call('PATCH', '/api/instance/settings/experimental', { enablePublicMcp: true });
+    if (!r.ok) { log(`turning on Paperclip's MCP server failed (${r.status}); retried at the next start`); return; }
+  }
+  log(`Paperclip's MCP server is on: ${publicUrl}${MCP_PATH} (setup: ${publicUrl}/mcp/setup). For Claude Code: claude mcp add --transport http paperclip ${publicUrl}${MCP_PATH}`);
+}
+
+// The Scheduler's scheduled-jobs script needs a board API key (agents' own keys may only manage routines assigned to
+// themselves). Kept while it works; a replaced one is revoked.
+async function ensureJobsKey() {
+  let saved = {};
+  try { saved = JSON.parse(fs.readFileSync(JOBS_CONFIG, 'utf8')); } catch {}
+  const zone = (() => { try { new Intl.DateTimeFormat('en', { timeZone: process.env.TZ }); return process.env.TZ || 'UTC'; } catch { return 'UTC'; } })();
+  // recordedBy: there is no clone here; CloudCLI's watch records the jobs in their repos.
+  const base_ = { url: base, publicUrl, timezone: zone, recordedBy: 'cloudcli' };
+  let works = false;
+  if (saved.token) {
+    try { works = (await fetch(`${base}/api/companies`, { headers: { authorization: `Bearer ${saved.token}`, accept: 'application/json' } })).ok; } catch {}
+  }
+  let next = { ...saved, ...base_ };
+  if (!works) {
+    const key = must(await call('POST', '/api/board-api-keys', { name: 'Scheduler (scheduled jobs)', expiresAt: null }), "creating the Scheduler's API key");
+    if (saved.keyId && saved.keyId !== key.id) await call('DELETE', `/api/board-api-keys/${saved.keyId}`).catch(() => {});
+    next = { ...next, keyId: key.id, token: key.token };
+  }
+  if (JSON.stringify(next) === JSON.stringify(saved)) return;
+  fs.mkdirSync(path.dirname(JOBS_CONFIG), { recursive: true });
+  fs.writeFileSync(JOBS_CONFIG, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 });
+  fs.chmodSync(JOBS_CONFIG, 0o600);
+  if (!works) log("stored the Scheduler's board API key (\"Scheduler (scheduled jobs)\")");
+}
+
+// The "Scheduler" agent: Paperclip's process adapter running scheduler.mjs (no AI, no cost) when it is given a task.
+async function ensureScheduler(company, state) {
+  const adapterConfig = {
+    command: 'node', args: [SCHEDULER_MJS], cwd: path.join(HOME, 'workspace'),
+    env: { SCHEDULED_JOBS_CONFIG: JOBS_CONFIG }, timeoutSec: 660,
+  };
+  let agent = null;
+  if (state.schedulerId) {
+    const r = await call('GET', `/api/agents/${state.schedulerId}`);
+    if (r.ok && r.json?.status !== 'terminated') agent = r.json;
+  }
+  if (!agent) {
+    const found = list(await call('GET', `/api/companies/${company.id}/agents`))
+      .find((a) => a.name === SCHEDULER && a.adapterType === 'process' && a.status !== 'terminated');
+    if (found) agent = must(await call('GET', `/api/agents/${found.id}`), 'reading the Scheduler agent');
+  }
+  if (!agent) {
+    agent = must(await call('POST', `/api/companies/${company.id}/agents`, {
+      name: SCHEDULER,
+      role: 'general',
+      title: 'Manages scheduled jobs',
+      capabilities: SCHEDULER_ABOUT,
+      adapterType: 'process',
+      adapterConfig,
+      // Wakes only for its tasks, never on a timer.
+      runtimeConfig: { heartbeat: { enabled: false, intervalSec: 0, wakeOnDemand: true } },
+    }), 'creating the Scheduler agent');
+    log(`created the agent "${SCHEDULER}" (manages the jobs for assistants connected through Paperclip's MCP server)`);
+  } else {
+    const cfg = agent.adapterConfig || {};
+    const patch = {};
+    if (agent.capabilities !== SCHEDULER_ABOUT) patch.capabilities = SCHEDULER_ABOUT;
+    // Paperclip keeps env values as bindings and hides them when read: only the key's presence can be checked. The
+    // Scheduler's env is the template's alone, so a change writes it whole.
+    if (cfg.command !== adapterConfig.command || JSON.stringify(cfg.args) !== JSON.stringify(adapterConfig.args)
+      || cfg.cwd !== adapterConfig.cwd || !cfg.env?.SCHEDULED_JOBS_CONFIG || cfg.timeoutSec !== adapterConfig.timeoutSec) {
+      patch.adapterConfig = adapterConfig;
+    }
+    if (Object.keys(patch).length) {
+      must(await call('PATCH', `/api/agents/${agent.id}`, patch), 'updating the Scheduler agent');
+      log(`updated the agent "${SCHEDULER}"`);
+    }
+    if (agent.lifecycleError) await call('POST', `/api/agents/${agent.id}/lifecycle/retry`, {}).catch(() => {});
+  }
+  state.schedulerId = agent.id;
+  return agent;
+}
+
+// Which engine runs the Runner. The goal is Paperclip's native runner with the preconfigured home (the repo's own
+// settings and skills load), but in the official image Paperclip's check of a native agent fails
+// (paperclipai/paperclip#18557: the Claude ACP package resolves outside the provider root it checks), so a Runner
+// created there, or converted before passing its check, stays paused and no job runs. So:
+// - a native Runner stuck in that check goes back to the legacy adapter (keeping its model, sign-in and instructions);
+// - a legacy Runner that passed its check moves to the native runner only once Paperclip's own test of that setup
+//   passes, as "Upgrade runner" does plus the preconfigured home. A version whose test doesn't pass isn't asked again.
+// - one converted by hand (the isolated home) gets the preconfigured home.
+async function runnerEngine(agent, company, state) {
+  const native = agent.adapterType === 'paperclip_runner' && agent.adapterConfig?.provider === 'acpx';
+  if (native && agent.lifecycleError) {
+    const c = agent.adapterConfig;
+    const r = await call('PATCH', `/api/agents/${agent.id}`, { adapterType: 'claude_local', runner: 'legacy', adapterConfig: { engine: 'cli', cwd: c.cwd, model: c.model || 'sonnet', dangerouslySkipPermissions: true } });
+    if (!r.ok) { log(`moving the Runner back to the legacy adapter failed (${r.status}: ${r.text})`); return agent; }
+    log("moved the Runner back to the legacy adapter: Paperclip's check of its native runner fails here (paperclipai/paperclip#18557)");
+    return r.json;
+  }
+  if (agent.adapterType === 'claude_local' && !agent.lifecycleError) {
+    const version = (await call('GET', '/api/health')).json?.version || '';
+    if (state.nativeRunnerFailed === version) return agent;
+    const t = await call('POST', `/api/companies/${company.id}/adapters/claude_local/test-environment`, { adapterConfig: { ...agent.adapterConfig, homeMode: 'preconfigured' }, runner: 'paperclip', agentId: agent.id });
+    if (!t.ok || t.json?.status !== 'pass') {
+      state.nativeRunnerFailed = version;
+      log(`the Runner stays on the legacy adapter: Paperclip ${version}'s test of its native runner doesn't pass (${t.ok ? (t.json?.checks || []).filter((x) => x.level === 'error').map((x) => x.code).join(', ') || t.json?.status : t.status})`);
+      return agent;
+    }
+    const r = await call('PATCH', `/api/agents/${agent.id}`, { runner: 'paperclip', adapterConfig: { homeMode: 'preconfigured' } });
+    if (!r.ok) { log(`moving the Runner to Paperclip's native runner failed (${r.status}: ${r.text}); it stays on the legacy adapter`); return agent; }
+    delete state.nativeRunnerFailed;
+    log("moved the Runner to Paperclip's native runner (the repo's settings and skills load as before)");
+    return r.json;
+  }
+  if (native && agent.adapterConfig?.homeMode !== 'preconfigured') {
+    const r = await call('PATCH', `/api/agents/${agent.id}`, { adapterConfig: { homeMode: 'preconfigured' } });
+    if (r.ok) { log("the Runner uses the preconfigured home (the repo's settings and skills)"); return r.json; }
+    log(`setting the Runner's preconfigured home failed (${r.status}: ${r.text})`);
+  }
+  return agent;
+}
+
+// The native runner's preconfigured home is Paperclip's own (HOME, /paperclip). Its runs are unattended: the runner
+// turns down every permission prompt, so a job's Bash or edits would be refused. Claude Code's user settings there
+// skip the prompts (permissions.defaultMode "bypassPermissions", honoured by the ACP adapter for a non-root user),
+// as the legacy adapter's dangerouslySkipPermissions did. The rest of the file is left as it is.
+function unattendedClaude() {
+  const file = path.join(process.env.HOME || HOME, '.claude', 'settings.json');
+  let cur = {};
+  if (fs.existsSync(file)) {
+    try { cur = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { log(`${file} is not valid JSON; the Runner's permission prompts are not skipped`); return; }
+  }
+  if (cur.permissions?.defaultMode === 'bypassPermissions') return;
+  cur.permissions = { ...(cur.permissions || {}), defaultMode: 'bypassPermissions' };
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(cur, null, 2) + '\n');
+  log(`the Runner's runs skip permission prompts, as before (${file})`);
 }
 
 // Rewrites an agent's AGENTS.md when it differs from the template's.
@@ -322,26 +575,22 @@ async function main() {
   const cwd = usable ? usable.dir : path.join(HOME, 'workspace');
   fs.mkdirSync(cwd, { recursive: true });
 
-  if (!email || !password) { log('ADMIN_EMAIL or ADMIN_PASSWORD is empty; the company and the Runner agent were not set up.'); return; }
-  let r = await signIn();
-  if (r.status === 401) {
-    const problem = await syncPassword().catch((e) => `could not update it: ${e.message}`);
-    if (problem) { log(`signing in as ADMIN_EMAIL failed and ${problem}. Nothing else wired.`); return; }
-  } else if (!r.ok) {
-    log(`signing in as ADMIN_EMAIL failed (${r.status}); nothing else wired. Redeploy to retry.`);
-    return;
-  }
+  if (!(await authenticate())) return;
 
   const company = await ensureCompany(state);
   state.companyId = company.id;
   await ensureSecret(company, state);
   const project = await ensureProject(company, usable, state);
+  unattendedClaude();
   const agent = await ensureRunner(company, cwd, state);
   state.agentId = agent.id;
   const codex = await keepCodex(company, cwd, state).catch((e) => { log(`keeping the Codex agent failed (${e.message}); retried at the next start`); return null; });
+  await enableMcp().catch((e) => log(`turning on Paperclip's MCP server failed (${e.message}); retried at the next start`));
+  const scheduler = await ensureJobsKey().then(() => ensureScheduler(company, state))
+    .catch((e) => { log(`setting up the Scheduler agent failed (${e.message}); retried at the next start`); return null; });
   fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2) + '\n');
-  log(`ready: company "${company.name}", project "${project.name}", agent "${agent.name}"${codex ? ` and "${codex.name}"` : ''} in ${cwd}`);
+  log(`ready: company "${company.name}", project "${project.name}", agents "${agent.name}"${codex ? `, "${codex.name}"` : ''}${scheduler ? `, "${scheduler.name}"` : ''}; the Runner works in ${cwd}`);
 }
 
 main().catch((e) => log(`stopped: ${e.message}`));

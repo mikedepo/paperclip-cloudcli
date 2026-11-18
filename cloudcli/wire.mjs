@@ -6,23 +6,30 @@
 //    installs (layer.mjs).
 // 3. Connects the skill and the /setup page to Paperclip: signs in with the login and creates a board API key named
 //    "CloudCLI scheduled-jobs" (kept in ~/.config/scheduled-jobs/paperclip.json, mode 600), unless the stored one works.
+//    So the password is needed only for the first key: once the user deletes it in Railway, the stored key is used,
+//    and only a key Paperclip refuses asks for the password again.
+//    Stores Paperclip's public address as Paperclip reports it (its OAuth issuer), else PAPERCLIP_PUBLIC_URL; the setup
+//    page (front.mjs) keeps it current every 5 minutes.
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import {
-  APP, CONFIG, H, SETUP, addProject, seedJobPermissions, bindRunnerSecrets, cloneRepo, log, readJson, repoInfo, repos, timezone, updateSetup,
-  validZone, wireMemory, writeLayer, writePrivateJson,
+  APP, CONFIG, H, SETUP, addProject, seedJobPermissions, bindRunnerSecrets, cloneRepo, log, paperclipPublicUrl, readJson, refreshPaperclipUrl,
+  repoInfo, repos, timezone, updateSetup, validZone, wireMemory, writeLayer, writePrivateJson,
 } from './layer.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const KEY_NAME = 'CloudCLI scheduled-jobs';
+const NEEDS_PASSWORD = "set ADMIN_PASSWORD in Paperclip's Variables, then redeploy Paperclip and CloudCLI";
 const paperclipUrl = (process.env.PAPERCLIP_URL || '').replace(/\/+$/, '');
-const publicUrl = (process.env.PAPERCLIP_PUBLIC_URL || '').replace(/\/+$/, '');
+const envPublicUrl = (process.env.PAPERCLIP_PUBLIC_URL || '').replace(/\/+$/, '');
 const [email = '', password = ''] = fs.readFileSync(0, 'utf8').split('\n');
 if (process.env.TZ && !validZone(process.env.TZ)) log(`TZ "${process.env.TZ}" is not a time zone name (use one like America/Toronto)`);
 
 async function call(method, p, { token, cookie, body } = {}) {
-  const headers = { accept: 'application/json', origin: publicUrl || paperclipUrl };
+  // The private address as the origin: Paperclip always trusts it (its own host, and in its allowed hostnames), while
+  // the public one changes with a custom domain, and a stale one fails the board's origin check for the new key.
+  const headers = { accept: 'application/json', origin: new URL(paperclipUrl).origin };
   if (body !== undefined) headers['content-type'] = 'application/json';
   if (token) headers.authorization = `Bearer ${token}`;
   if (cookie) headers.cookie = cookie;
@@ -36,15 +43,27 @@ async function call(method, p, { token, cookie, body } = {}) {
 async function connect() {
   if (!paperclipUrl) { log('PAPERCLIP_URL is empty; the scheduled-jobs skill is not connected'); return; }
   const saved = readJson(CONFIG);
-  const save = (data) => writePrivateJson(CONFIG, { ...readJson(CONFIG), ...data, url: paperclipUrl, publicUrl, timezone: timezone() });
+  const save = async (data) => {
+    const cfg = readJson(CONFIG);
+    writePrivateJson(CONFIG, { ...cfg, ...data, url: paperclipUrl, publicUrl: cfg.publicUrl || envPublicUrl, timezone: timezone() });
+    const { issuer } = await refreshPaperclipUrl();
+    const url = paperclipPublicUrl();
+    log(`Paperclip's address for links: ${url || 'unknown'} (${!issuer ? "from PAPERCLIP_PUBLIC_URL: Paperclip didn't report one" : issuer === url ? 'as Paperclip reports it' : `Paperclip reports ${issuer}, which doesn't reach it yet`})`);
+  };
   for (let i = 0; i < 60; i++) {
     try {
-      if (saved.token && (await call('GET', '/api/companies', { token: saved.token })).ok) {
-        save({});
-        log('the scheduled-jobs skill is connected to Paperclip (stored key works)');
-        return;
+      if (saved.token) {
+        const k = await call('GET', '/api/companies', { token: saved.token });
+        if (k.ok) {
+          await save({});
+          log('the scheduled-jobs skill is connected to Paperclip (stored key works)');
+          return;
+        }
+        // Without a password, only a key Paperclip refuses needs one again; anything else is Paperclip starting.
+        if (!password && ![401, 403].includes(k.status)) throw new Error(`Paperclip answered ${k.status}`);
+        if (!password) { log(`Paperclip refused the scheduled-jobs skill's stored key, and there is no password to make a new one: ${NEEDS_PASSWORD}`); return; }
       }
-      if (!email || !password) { log('no login to connect with; the scheduled-jobs skill is not connected'); return; }
+      if (!email || !password) { log(`no password to connect the scheduled-jobs skill to Paperclip with: ${NEEDS_PASSWORD}`); return; }
       const si = await call('POST', '/api/auth/sign-in/email', { body: { email: email.trim().toLowerCase(), password } });
       if (si.status === 401) { log('signing in to Paperclip with the login failed (401); the scheduled-jobs skill is not connected. Redeploy after fixing the login.'); return; }
       if (!si.ok) throw new Error(`sign-in ${si.status}`);
@@ -53,7 +72,7 @@ async function connect() {
       if (!key.ok || !key.json?.token) throw new Error(`creating the key ${key.status}`);
       if (saved.keyId && saved.keyId !== key.json.id) await call('DELETE', `/api/board-api-keys/${saved.keyId}`, { cookie }).catch(() => {});
       await call('POST', '/api/auth/sign-out', { cookie, body: {} }).catch(() => {});
-      save({ keyId: key.json.id, token: key.json.token });
+      await save({ keyId: key.json.id, token: key.json.token });
       log(`the scheduled-jobs skill is connected to Paperclip (board API key "${KEY_NAME}")`);
       return;
     } catch (e) {
@@ -92,7 +111,9 @@ try {
   log(`marking CloudCLI's first-run wizard done failed (${e.message}); it shows once`);
 }
 
+const shownUrl = paperclipPublicUrl();
 await connect();
+if (paperclipPublicUrl() !== shownUrl) writeLayer(); // the CLAUDE.md block names it
 
 // Installs from before the Runner's bindings covered GitHub get them here, with no step to redo.
 try {

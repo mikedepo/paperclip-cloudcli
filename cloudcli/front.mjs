@@ -6,14 +6,19 @@
 //      Claude: runs the official `claude setup-token` in a terminal and relays what it prints (the sign-in link) and
 //      the code the user pastes back; the token it prints goes to Claude Code's user settings here and to Paperclip
 //      (company secret CLAUDE_CODE_OAUTH_TOKEN, referenced by the Runner agent), with no redeploy.
-//      Codex: two one-time codes in a row, since one ChatGPT sign-in can't serve two servers: Paperclip's own ChatGPT
-//      sign-in for a "Codex" agent that runs jobs, then `codex login --device-auth` here for CloudCLI's Codex chats.
+//      Codex: Paperclip's own ChatGPT sign-in (a one-time code) for a "Codex" agent that runs jobs. Codex chats in
+//      CloudCLI are off unless the user turns them on, since they run without permission prompts: then
+//      `codex login --device-auth` here, a second code (one ChatGPT sign-in can't serve two servers).
 //   2. GitHub: `gh auth login --web` (device code), then `gh auth setup-git`; the token becomes Paperclip's GITHUB_TOKEN.
 //   3. Repos: adds a repo (never replaces one): clones it into the home folder and gives it its own project in
 //      Paperclip, whose primary workspace it is, so each repo's jobs run on that repo.
 //   4. Time zone: from the browser; used by the scheduled-jobs script and terminals here.
+//   Optional, your own domains: the Railway steps for each app's custom domain, and checks of DNS, HTTPS and whether
+//      Paperclip uses it yet. A CloudCLI domain that reaches this server is used at once.
+// - Every 5 minutes, Paperclip's public address as Paperclip reports it, so links follow a new domain (layer.mjs).
 // - Until setup is done or skipped, opening CloudCLI's home page redirects to /setup.
 import { spawn, spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import { createRequire } from 'node:module';
@@ -21,8 +26,9 @@ import net from 'node:net';
 import path from 'node:path';
 import {
   APP, CONFIG, H, addProject, bindRunnerSecrets, claudeSignedIn, cloneRepo, cloudcliUrl, codexIntent, codexSignedIn,
-  connectCodexAgent, paperclipPublicUrl, pc, readJson, readSetup, repoInfo, repoProject, runnerContext, sameRepo,
-  saveClaudeToken, timezone, updateSetup, upsertSecret, validZone, wireMemory, writeLayer, writePrivateJson, writeShellZone,
+  connectCodexAgent, mcpCommand, mcpSetupUrl, mcpUrl, paperclipIssuer, paperclipPublicUrl, pc, publicDns, readJson, readSetup, refreshPaperclipUrl, repoInfo,
+  repoProject, runnerContext, sameRepo, saveClaudeToken, timezone, updateSetup, upsertSecret, validZone, wireMemory, writeLayer, writePrivateJson,
+  writeShellZone,
 } from './layer.mjs';
 
 const PORT = Number(process.env.FRONT_PORT || 3001);
@@ -208,7 +214,7 @@ function repoList() {
   });
 }
 
-// ---------- step 1, Codex: for Paperclip's jobs (Paperclip's own ChatGPT sign-in), then for CloudCLI's chats ----------
+// ---------- step 1, Codex: for Paperclip's jobs (Paperclip's own ChatGPT sign-in), and CloudCLI's chats if turned on ----------
 
 const DEVICE_HINT = 'If ChatGPT said device code sign-in is off: in ChatGPT, Settings, Security and login, turn on "Enable device code sign-in for Codex" (near the bottom), then press Start again.';
 let codex = null; // Paperclip's sign-in: { status, url, code, error }
@@ -253,10 +259,39 @@ async function codexSignIn(job) {
   writeLayer();
   job.status = 'done';
   say(`Codex connected for Paperclip's jobs (agent "Codex" ${how})`);
-  // The second code, for CloudCLI's chats, right away: the user is still on ChatGPT's device page.
-  if (!codexSignedIn()) {
+  // Codex chats turned on while this code was waiting: their code next, while the user is still on ChatGPT's page.
+  if (readSetup().codexChats?.on && !codexSignedIn()) {
     try { codexHereStart(); } catch (e) { say(`starting Codex's sign-in for CloudCLI failed (${e.message})`); }
   }
+}
+
+// Codex chats in CloudCLI are off unless the user turns them on (the owner's choice, 2026-11-17): Codex's sandbox
+// can't start on Railway, so they run only in CloudCLI's Bypass Permissions mode, with no permission prompts. On: the
+// user's consent (setup.json `codexChats`; the page then selects that mode in the browser), and Codex's sign-in here
+// if it has none yet. Off: signs Codex out here (its chats and terminal); Paperclip's Codex jobs keep their own sign-in.
+const codexBin = () => {
+  const own = path.join(H, '.npm-global', 'bin', 'codex');
+  return fs.existsSync(own) ? own : 'codex';
+};
+const codexBusy = () => !!codex && ['starting', 'waiting-user', 'saving'].includes(codex.status);
+function codexChats(on) {
+  if (on) {
+    updateSetup({ codexChats: { on: true, at: new Date().toISOString() } });
+    say('Codex chats turned on: they run in Bypass Permissions mode, without permission prompts');
+    // While Paperclip's code for jobs waits, the chats' code follows it (codexSignIn), not alongside it.
+    if (!codexSignedIn() && !codexBusy()) codexHereStart();
+    return;
+  }
+  if (codexHere?.pty && ['starting', 'waiting-user'].includes(codexHere.status)) {
+    codexHere.status = 'off';
+    try { codexHere.pty.kill(); } catch {}
+  }
+  if (codexSignedIn()) {
+    const r = spawnSync(codexBin(), ['logout'], { cwd: H, env: childEnv(), encoding: 'utf8', timeout: 30000 });
+    if (codexSignedIn()) throw new Error(`Codex is still signed in here: codex logout ${r.error ? `failed (${r.error.message})` : `ended with ${(r.stderr || r.stdout || `exit ${r.status}`).trim().slice(0, 200)}`}`);
+  }
+  updateSetup({ codexChats: { on: false, at: new Date().toISOString() } });
+  say('Codex chats turned off: Codex signed out of CloudCLI (Paperclip\'s Codex jobs are unchanged)');
 }
 
 // Codex in CloudCLI's chats and terminal: its own sign-in, here (a second one-time code). The same credential can't
@@ -265,11 +300,10 @@ let codexHere = null; // { status, url, code, error, pty, out }
 function codexHereStart() {
   if (codexHere && ['starting', 'waiting-user'].includes(codexHere.status)) return;
   const pty = createRequire(path.join(APP, 'package.json'))('node-pty');
-  const own = path.join(H, '.npm-global', 'bin', 'codex');
   const env = childEnv({ BROWSER: 'true' });
   for (const k of ['OPENAI_API_KEY', 'CODEX_API_KEY']) delete env[k];
   const job = { status: 'starting', url: null, code: null, error: null, out: '' };
-  job.pty = pty.spawn(fs.existsSync(own) ? own : 'codex', ['login', '--device-auth'], { name: 'xterm-256color', cols: 400, rows: 50, cwd: H, env });
+  job.pty = pty.spawn(codexBin(), ['login', '--device-auth'], { name: 'xterm-256color', cols: 400, rows: 50, cwd: H, env });
   job.pty.onData((d) => {
     job.out = (job.out + d).slice(-50000);
     if (job.code) return;
@@ -285,7 +319,7 @@ function codexHereStart() {
       job.status = 'done';
       updateSetup({ codexCloudcli: { done: true, at: new Date().toISOString() } });
       say('Codex signed in for CloudCLI');
-    } else if (!['done', 'error'].includes(job.status)) {
+    } else if (!['done', 'error', 'off'].includes(job.status)) {
       job.status = 'error';
       job.error = `codex login ended (exit ${exitCode}) without signing in: ${strip(job.out).trim().split('\n').filter(Boolean).slice(-2).join(' ').slice(0, 300)}. ${DEVICE_HINT}`;
     }
@@ -298,6 +332,145 @@ function codexHereStart() {
     if (job.status === 'waiting-user') { job.status = 'error'; job.error = 'ChatGPT confirmed nothing within 15 minutes. Press the button again.'; try { job.pty.kill(); } catch {} }
   }, 15 * 60e3);
   codexHere = job;
+}
+
+// ---------- optional: your own domains ----------
+// The user adds each domain in Railway (no Railway token here); this page gives the steps and checks the result. A
+// CloudCLI domain whose HTTPS reaches this server is used at once (links, CLAUDE.md). Paperclip takes a domain only at
+// its next start: Railway makes it its public domain (PAPERCLIP_PUBLIC_URL), and its start adds every earlier one to
+// the hostnames it answers, so the Railway address keeps working.
+
+const PORTS = {
+  cloudcli: PORT,
+  inner: UP, // CloudCLI itself, behind this page: Railway lists it too, but a domain on it would skip /setup
+  paperclip: Number((() => { try { return new URL(process.env.PAPERCLIP_URL).port; } catch { return ''; } })()) || 3100,
+};
+const HOST = /^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
+
+// "https://Cloud.Example.com/setup" -> "cloud.example.com"; '' clears; an error for anything else.
+function domainOf(raw) {
+  const s = String(raw || '').trim().toLowerCase().replace(/^[a-z]+:\/\//, '').replace(/[/?#].*$/, '').replace(/:\d+$/, '').replace(/\.$/, '');
+  if (!s) return '';
+  if (!HOST.test(s)) throw new Error(`"${String(raw).trim()}" isn't a domain name (such as cloudcli.example.com)`);
+  if (/(^|\.)(railway\.app|railway\.internal)$/.test(s)) throw new Error(`${s} is a Railway address. Enter a domain of your own.`);
+  return s;
+}
+
+// The domain's public DNS (layer.mjs publicDns). HTTPS is checked only once it works: from inside Railway, a domain
+// added on one of its services can already answer while the public can't reach it.
+const dnsCheck = publicDns;
+const WAIT_DNS = { ok: false, why: 'waits for the DNS record', wait: true };
+
+async function httpsGet(host, p) {
+  try {
+    const r = await fetch(`https://${host}${p}`, { headers: { accept: 'application/json' }, redirect: 'manual', signal: AbortSignal.timeout(10000) });
+    const text = await r.text().catch(() => '');
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+    return { status: r.status, fallback: r.headers.get('x-railway-fallback') === 'true', json, text: text.slice(0, 300) };
+  } catch (e) {
+    return { error: String(e.cause?.code || e.name || e.message) };
+  }
+}
+
+// Why HTTPS doesn't reach the app yet, or null when something answered for this domain.
+function notReached(r, app, d) {
+  if (r.error === 'ENOTFOUND' || r.error === 'EAI_AGAIN') return 'no DNS record yet';
+  if (d.elsewhere && (r.error || r.status !== 200)) return "it doesn't reach Railway: the DNS record points elsewhere";
+  if (r.error && /CERT|SSL|TLS|SELF_SIGNED|UNABLE_TO_VERIFY/i.test(r.error)) return "its HTTPS certificate isn't ready yet: Railway issues it a few minutes after it sees the DNS record";
+  if (r.error) return `no answer (${r.error})`;
+  if (r.fallback) return `Railway doesn't send it to ${app} yet: add it as a custom domain on the ${app} service`;
+  return null;
+}
+
+// CloudCLI: a one-time nonce, answered by this process only (/setup/probe/<nonce>), proves the domain reaches this server.
+const probes = new Set();
+async function probeCloudcli(host) {
+  const nonce = randomBytes(16).toString('hex');
+  probes.add(nonce);
+  const r = await httpsGet(host, `/setup/probe/${nonce}`);
+  probes.delete(nonce);
+  return { ok: r.status === 200 && r.json?.probe === nonce, r };
+}
+async function checkCloudcli(host) {
+  const d = await dnsCheck(host);
+  if (!d.ok) return { host, port: PORTS.cloudcli, dns: d, https: WAIT_DNS, inUse: false };
+  const { ok, r } = await probeCloudcli(host);
+  const why = ok ? null : notReached(r, 'CloudCLI', d)
+    || `it answers, but not through this page (HTTP ${r.status}): in Railway, check that the domain's port is ${PORTS.cloudcli}`;
+  return { host, port: PORTS.cloudcli, dns: d, https: { ok, why }, inUse: ok };
+}
+// The address works for browsers: public DNS, then this server's nonce through HTTPS.
+async function cloudcliReached(host) {
+  return (await dnsCheck(host)).ok && (await probeCloudcli(host)).ok;
+}
+
+// Paperclip: its OAuth issuer through the domain is the one it reports over the private network (no key is sent to
+// the domain). Before its next start Paperclip turns the name away with 403: it reached Paperclip, which must be
+// redeployed to answer it.
+async function checkPaperclip(host) {
+  const [d, { issuer: reported, changed }] = await Promise.all([dnsCheck(host), refreshPaperclipUrl()]);
+  if (changed) writeLayer();
+  const issuer = reported || (await paperclipIssuer());
+  const current = issuer || paperclipPublicUrl();
+  if (!d.ok) return { host, port: PORTS.paperclip, dns: d, https: WAIT_DNS, inUse: current === `https://${host}`, current };
+  const r = await httpsGet(host, '/.well-known/oauth-authorization-server');
+  let ok = false;
+  let why = notReached(r, 'Paperclip', d);
+  let redeploy = false;
+  if (!why) {
+    if (r.status === 200 && r.json?.issuer) {
+      ok = !!issuer && (() => { try { return new URL(r.json.issuer).origin === issuer; } catch { return false; } })();
+      if (!ok) why = `it answers as another Paperclip (${String(r.json.issuer).slice(0, 100)})`;
+    } else if (r.status === 403 && /hostname is not allowed/i.test(r.json?.error || r.text)) {
+      redeploy = true;
+      why = 'it reaches Paperclip, which answers this name after a redeploy';
+    } else if (r.status === 503) {
+      const h = await httpsGet(host, '/api/health');
+      ok = h.status === 200 && !!h.json?.status;
+      if (!ok) why = `it answers, but not as Paperclip (HTTP ${h.status || h.error})`;
+    } else why = `it answers, but not as Paperclip (HTTP ${r.status})`;
+  }
+  return { host, port: PORTS.paperclip, dns: d, https: { ok, why, redeploy }, inUse: current === `https://${host}`, current };
+}
+
+async function checkDomains() {
+  const saved = readSetup().domains || {};
+  const out = {};
+  await Promise.all([
+    saved.cloudcli?.host && checkCloudcli(saved.cloudcli.host).then((c) => { out.cloudcli = c; }),
+    saved.paperclip?.host && checkPaperclip(saved.paperclip.host).then((c) => { out.paperclip = c; }),
+  ]);
+  const now = new Date().toISOString();
+  const next = { ...(readSetup().domains || {}) };
+  if (out.cloudcli && next.cloudcli?.host === out.cloudcli.host) {
+    next.cloudcli = { host: out.cloudcli.host, verified: out.cloudcli.inUse, checkedAt: now };
+    if (out.cloudcli.inUse) next.lastWorking = out.cloudcli.host;
+  }
+  if (out.paperclip && next.paperclip?.host === out.paperclip.host) next.paperclip = { host: out.paperclip.host, checkedAt: now };
+  const wasUrl = cloudcliUrl();
+  updateSetup({ domains: next });
+  if (cloudcliUrl() !== wasUrl) {
+    writeLayer();
+    say(`CloudCLI's address is now ${cloudcliUrl()}`);
+  }
+  return out;
+}
+
+async function saveDomains(b) {
+  const saved = readSetup().domains || {};
+  const next = { ...saved };
+  for (const app of ['cloudcli', 'paperclip']) {
+    if (!(app in b)) continue;
+    const host = domainOf(b[app]);
+    if (!host) delete next[app];
+    else if (saved[app]?.host !== host) next[app] = { host };
+  }
+  if (next.cloudcli && next.cloudcli.host === next.paperclip?.host) throw new Error('CloudCLI and Paperclip need a domain each');
+  const wasUrl = cloudcliUrl();
+  updateSetup({ domains: next });
+  if (cloudcliUrl() !== wasUrl) writeLayer();
+  return checkDomains();
 }
 
 // ---------- step 4: time zone ----------
@@ -346,13 +519,15 @@ function state() {
     codex: {
       done: !!s.codex?.done, status: codex?.status || null, error: codex?.error || null,
       url: codex?.status === 'waiting-user' ? codex.url : null, code: codex?.status === 'waiting-user' ? codex.code : null,
+      chats: !!s.codexChats?.on, // the user turned Codex chats on (they run without permission prompts)
       here: {
         done: codexSignedIn(), status: codexHere?.status || null, error: codexHere?.error || null,
         url: codexHere?.status === 'waiting-user' ? codexHere.url : null, code: codexHere?.status === 'waiting-user' ? codexHere.code : null,
       },
     },
     paperclipConnected: !!cfg.token,
-    links: { cloudcli: cloudcliUrl || '/', paperclip: paperclipPublicUrl },
+    links: { cloudcli: cloudcliUrl() || '/', paperclip: paperclipPublicUrl(), mcp: mcpUrl(), mcpSetup: mcpSetupUrl(), mcpCommand: mcpUrl() ? mcpCommand() : '' },
+    domains: { cloudcli: s.domains?.cloudcli?.host || '', paperclip: s.domains?.paperclip?.host || '', ports: PORTS },
     done: !!s.done,
     skipped: !!s.skipped,
   };
@@ -376,7 +551,22 @@ async function api(req, res, route) {
     if (route === 'repo') return send(res, 200, { ...(await pickRepo(b.repo)), state: state() });
     if (route === 'timezone') { saveZone(b.timezone); return send(res, 200, state()); }
     if (route === 'codex/start') { codexStart(); for (let i = 0; i < 40 && codex.status === 'starting'; i++) await sleep(500); return send(res, 200, state()); }
-    if (route === 'codex/here') { codexHereStart(); for (let i = 0; i < 30 && codexHere.status === 'starting'; i++) await sleep(500); return send(res, 200, state()); }
+    if (route === 'codex/chats') {
+      if (typeof b.on !== 'boolean') throw new Error('say on or off');
+      if (b.on && b.accept !== true) throw new Error('Codex chats run without permission prompts: tick the box to accept that first.');
+      codexChats(b.on);
+      for (let i = 0; i < 30 && codexHere?.status === 'starting'; i++) await sleep(500);
+      return send(res, 200, state());
+    }
+    // A new code for chats already turned on (an expired code, or a sign-in again after a plan change).
+    if (route === 'codex/here') {
+      if (!readSetup().codexChats?.on) throw new Error('Codex chats are off: turn them on first.');
+      codexHereStart();
+      for (let i = 0; i < 30 && codexHere.status === 'starting'; i++) await sleep(500);
+      return send(res, 200, state());
+    }
+    if (route === 'domains') return send(res, 200, { checks: await saveDomains(b), state: state() });
+    if (route === 'domains/check') return send(res, 200, { checks: await checkDomains(), state: state() });
     if (route === 'finish') { updateSetup({ done: true }); return send(res, 200, state()); }
     if (route === 'skip') { updateSetup({ skipped: true }); return send(res, 200, state()); }
     return send(res, 404, { error: 'unknown step' });
@@ -402,12 +592,18 @@ const settled = () => { const s = readSetup(); return s.done || s.skipped || !!p
 
 const server = http.createServer(async (req, res) => {
   try {
+    noteHost(req);
     const url = new URL(req.url, 'http://x');
     if (url.pathname === '/setup' || url.pathname === '/setup/') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
       return res.end(PAGE);
     }
     if (url.pathname.startsWith('/setup/api/')) return await api(req, res, url.pathname.slice('/setup/api/'.length));
+    // The own-domain check's probe: answers only a nonce this process is waiting for, so it tells nothing to others.
+    if (url.pathname.startsWith('/setup/probe/')) {
+      const nonce = url.pathname.slice('/setup/probe/'.length);
+      return probes.has(nonce) ? send(res, 200, { probe: nonce }) : send(res, 404, { error: 'not found' });
+    }
     if (req.method === 'GET' && url.pathname === '/' && /text\/html/.test(req.headers.accept || '') && !settled()) {
       res.writeHead(302, { location: '/setup', 'cache-control': 'no-store' });
       return res.end();
@@ -432,3 +628,44 @@ server.on('upgrade', (req, socket, head) => {
   socket.on('error', () => up.destroy());
 });
 server.listen(PORT, '0.0.0.0', () => say(`listening on ${PORT}, CloudCLI on ${UP}`));
+
+// Every 5 minutes (and soon after start), the apps' addresses (layer.mjs): Paperclip's as it reports it, Railway's
+// public domain for CloudCLI and the user's own CloudCLI domain, each used once it reaches its app. So links, the MCP
+// address and the CLAUDE.md block follow a domain change without a redeploy of CloudCLI, and never move to an address
+// whose DNS record or certificate isn't ready.
+async function watchAddresses() {
+  const was = cloudcliUrl();
+  const { changed } = await refreshPaperclipUrl();
+  const env = process.env.RAILWAY_PUBLIC_DOMAIN;
+  const own = readSetup().domains?.cloudcli?.host;
+  const [envOk, ownOk] = await Promise.all([env && cloudcliReached(env), own && cloudcliReached(own)]);
+  const next = { ...(readSetup().domains || {}) }; // read again: the card may have saved meanwhile
+  if (env) {
+    next.env = { host: env, ok: envOk };
+    if (envOk) next.lastWorking = env;
+  }
+  if (own && next.cloudcli?.host === own) {
+    next.cloudcli = { ...next.cloudcli, verified: ownOk };
+    if (ownOk) next.lastWorking = own;
+  }
+  updateSetup({ domains: next });
+  if (cloudcliUrl() !== was) say(`CloudCLI's address for links is now ${cloudcliUrl()}`);
+  if (changed || cloudcliUrl() !== was) writeLayer();
+}
+// The Railway address of this service, as browsers use it (Railway's edge only sends this service the hosts it has).
+let seenRailway = readSetup().domains?.railway || '';
+function noteHost(req) {
+  // Host, not X-Forwarded-Host: Railway's edge routes by Host, so it is always one of this service's domains, while a
+  // forwarded header may carry what the visitor sent.
+  const h = String(req.headers.host || '').trim().toLowerCase().replace(/:\d+$/, '');
+  if (h === seenRailway || !/^[a-z0-9-]+\.up\.railway\.app$/.test(h)) return;
+  seenRailway = h;
+  try {
+    const was = cloudcliUrl();
+    updateSetup({ domains: { ...(readSetup().domains || {}), railway: h } });
+    if (cloudcliUrl() !== was) writeLayer();
+  } catch {}
+}
+const watch = () => watchAddresses().catch((e) => say(`checking the apps' addresses failed (${e.message})`));
+setTimeout(watch, 20e3).unref();
+setInterval(watch, 5 * 60e3).unref();

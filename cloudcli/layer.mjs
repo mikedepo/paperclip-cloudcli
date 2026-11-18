@@ -4,6 +4,7 @@
 // skill, for Claude's and Codex's chats). Own names only.
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import dns from 'node:dns';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -18,8 +19,98 @@ const SKILL_DIR = path.join(H, '.claude', 'skills', 'scheduled-jobs');
 const CODEX_SKILL_LINK = path.join(H, '.agents', 'skills', 'scheduled-jobs');
 const codexHome = () => process.env.CODEX_HOME || path.join(H, '.codex');
 export const log = (m) => console.log(`[wiring] ${m}`);
-export const cloudcliUrl = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : '';
-export const paperclipPublicUrl = (process.env.PAPERCLIP_PUBLIC_URL || '').replace(/\/+$/, '');
+const PAPERCLIP_URL = (process.env.PAPERCLIP_URL || '').replace(/\/+$/, '');
+
+// The apps' public addresses, read each time they are used, so a domain change reaches links, the setup page and
+// the CLAUDE.md block without a redeploy of CloudCLI. Railway makes a custom domain the public one (RAILWAY_PUBLIC_DOMAIN,
+// so Paperclip's PAPERCLIP_PUBLIC_URL) as soon as it is added, before its DNS record exists: links move to a new
+// address only once it reaches the app, and keep the last one that did until then.
+// CloudCLI's (setup.json `domains`, kept by the setup page, front.mjs): a domain of the user's that reached this server
+// on the "Your own domains" card, else Railway's public domain while it reaches this server, else the last address
+// that did, else the Railway address browsers last used (an install updated after the switch knows no other).
+export function cloudcliUrl() {
+  const d = readSetup().domains || {};
+  const env = process.env.RAILWAY_PUBLIC_DOMAIN || '';
+  const host = d.cloudcli?.host && d.cloudcli.verified ? d.cloudcli.host
+    : env && d.env?.host === env && d.env.ok ? env : d.lastWorking || d.railway || env;
+  return host ? `https://${host}` : '';
+}
+// Paperclip's, for links (kept in the scheduled-jobs connection file, whose links use it too): the address Paperclip
+// reports while it reaches Paperclip, else the last one that did (refreshPaperclipUrl); before CloudCLI first asked,
+// PAPERCLIP_PUBLIC_URL as of CloudCLI's last deploy.
+export function paperclipPublicUrl() {
+  return (readJson(CONFIG).publicUrl || process.env.PAPERCLIP_PUBLIC_URL || '').replace(/\/+$/, '');
+}
+// Paperclip's MCP server, for assistants on people's own computers (Paperclip's wiring turns it on at every start).
+// Always on the address Paperclip reports: its OAuth connections are bound to it, and fail on any other.
+const mcpBase = () => (readJson(CONFIG).issuer || paperclipPublicUrl());
+export const mcpUrl = () => (mcpBase() ? `${mcpBase()}/mcp/paperclip` : '');
+export const mcpSetupUrl = () => (mcpBase() ? `${mcpBase()}/mcp/setup` : '');
+export const mcpCommand = () => `claude mcp add --transport http paperclip ${mcpUrl() || '<Paperclip public URL>/mcp/paperclip'}`;
+
+// Paperclip's public address as Paperclip reports it: the issuer of its OAuth metadata, which is its
+// PAPERCLIP_PUBLIC_URL as of its last start, read over the private network. null while Paperclip doesn't answer (it
+// is starting, or its MCP server was turned off in its settings).
+export async function paperclipIssuer(base = readJson(CONFIG).url || PAPERCLIP_URL) {
+  if (!base) return null;
+  try {
+    const r = await fetch(`${base}/.well-known/oauth-authorization-server`, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return null;
+    const u = new URL((await r.json()).issuer);
+    return u.protocol === 'https:' ? u.origin : null;
+  } catch { return null; }
+}
+// A domain's public DNS, as browsers see it: asked of public resolvers, not of Railway's own, which can already send
+// a domain added on one of its services there while the domain's public record points elsewhere (seen on the test
+// project); the system resolver only when the public ones don't answer. Railway asks for a CNAME to
+// <id>.up.railway.app: a CNAME elsewhere (an old host, a wildcard record) is wrong; an address without a CNAME may be
+// right (a proxy such as Cloudflare's flattens it), and HTTPS settles it.
+export async function publicDns(host) {
+  const ask = async (resolver) => {
+    const q = (fn) => resolver[fn](host).catch((e) => {
+      if (['ETIMEOUT', 'ECONNREFUSED', 'ESERVFAIL', 'ECANCELLED'].includes(e.code)) throw e;
+      return [];
+    });
+    return Promise.all([q('resolveCname'), q('resolve4'), q('resolve6')]);
+  };
+  let answers;
+  try {
+    const r = new dns.promises.Resolver({ timeout: 4000, tries: 2 });
+    r.setServers(['1.1.1.1', '8.8.8.8']);
+    answers = await ask(r);
+  } catch {
+    answers = await ask(dns.promises).catch(() => [[], [], []]);
+  }
+  const [cname, v4, v6] = answers;
+  const target = cname[0] || v4[0] || v6[0] || '';
+  const railway = /\.railway\.app$/.test(cname[0] || '');
+  return { ok: railway || (!cname[0] && !!target), target, railway, elsewhere: !!cname[0] && !railway };
+}
+const hostOf = (origin) => { try { return new URL(origin).hostname; } catch { return ''; } };
+
+// Whether a public address reaches this Paperclip: its public DNS works, and through it Paperclip reports the same
+// issuer (no key is sent).
+export async function reachesPaperclip(origin, issuer) {
+  if (!(await publicDns(hostOf(origin))).ok) return false;
+  try {
+    const r = await fetch(`${origin}/.well-known/oauth-authorization-server`, { headers: { accept: 'application/json' }, redirect: 'manual', signal: AbortSignal.timeout(10000) });
+    return r.ok && new URL((await r.json()).issuer).origin === issuer;
+  } catch { return false; }
+}
+// Keeps the stored addresses on what Paperclip reports. changed: the links, the MCP address and the CLAUDE.md block
+// (writeLayer) must follow. Nothing is stored before the scheduled-jobs skill is connected (wire.mjs connects it).
+export async function refreshPaperclipUrl() {
+  const issuer = await paperclipIssuer();
+  if (!issuer || !fs.existsSync(CONFIG)) return { issuer, changed: false };
+  const cfg = readJson(CONFIG);
+  let publicUrl = cfg.publicUrl || '';
+  if (publicUrl !== issuer && ((await reachesPaperclip(issuer, issuer)) || !publicUrl || !(await reachesPaperclip(publicUrl, issuer)))) publicUrl = issuer;
+  if (cfg.publicUrl === publicUrl && cfg.issuer === issuer) return { issuer, publicUrl, changed: false };
+  writePrivateJson(CONFIG, { ...cfg, publicUrl, issuer });
+  if (cfg.publicUrl !== publicUrl) log(`Paperclip's address for links is now ${publicUrl}${cfg.publicUrl ? ` (was ${cfg.publicUrl})` : ''}`);
+  if (publicUrl !== issuer) log(`Paperclip reports ${issuer} as its address, which doesn't reach it yet (DNS or HTTPS); links keep ${publicUrl}`);
+  return { issuer, publicUrl, changed: true };
+}
 
 export function readJson(file, fallback = {}) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
@@ -76,7 +167,9 @@ export async function upsertSecret(company, name, value) {
 // The Runner's environment variable -> the company secret it comes from. A run gets only what is bound on its agent:
 // Paperclip uses the GITHUB_TOKEN company secret for its own checkouts, not inside runs (where, with no GitHub
 // connection set up in Paperclip, git and gh would look for a GitHub login of Paperclip's own that doesn't exist).
-export const RUNNER_SECRETS = { CLAUDE_CODE_OAUTH_TOKEN: 'CLAUDE_CODE_OAUTH_TOKEN', GH_TOKEN: 'GITHUB_TOKEN', GITHUB_TOKEN: 'GITHUB_TOKEN' };
+// GH_PAT too: Paperclip's native runner never passes GH_TOKEN or GITHUB_TOKEN to a run; the gh wrapper on Paperclip's
+// service (its start.sh) uses GH_PAT for gh and git when neither is set.
+export const RUNNER_SECRETS = { CLAUDE_CODE_OAUTH_TOKEN: 'CLAUDE_CODE_OAUTH_TOKEN', GH_TOKEN: 'GITHUB_TOKEN', GITHUB_TOKEN: 'GITHUB_TOKEN', GH_PAT: 'GITHUB_TOKEN' };
 // The Codex agent's: GitHub only. Its ChatGPT sign-in is Paperclip's own AI connection, bound in its runtimeConfig.
 // Paperclip keeps variables named *KEY*, *SECRET* or *TOKEN* out of Codex's commands, so the token is also GH_PAT,
 // which the gh wrapper on Paperclip's service (its start.sh) uses for gh and git.
@@ -153,6 +246,8 @@ export async function connectCodexAgent({ connectionId, grantId }) {
       title: 'Runs scheduled jobs with Codex',
       capabilities: 'Runs the repo skill each scheduled job names, then closes its task.',
       adapterType: 'codex_local',
+      // Paperclip 2026.1106 puts new Codex agents on its native runner, which drops the CLI engine; keep the legacy one.
+      runner: 'legacy',
       // The CLI engine runs the real codex CLI (`codex exec`), as the Runner runs the real claude CLI. No sandbox or
       // approvals, as the Runner skips permissions: nobody is there to approve, and the job follows a written skill.
       // No model: Codex's own default, which OpenAI keeps valid for ChatGPT sign-in; one picked in Paperclip is kept.
@@ -394,7 +489,9 @@ function layerLines(ai) {
     '',
     "- A Railway server from AvgSoft's Paperclip + CloudCLI template: CloudCLI (this app; the home folder is kept on a volume) and Paperclip, which runs the scheduled jobs.",
   ];
-  const setupPage = `${cloudcliUrl || "CloudCLI's address"}/setup`;
+  const setupPage = `${cloudcliUrl() || "CloudCLI's address"}/setup`;
+  const pcUrl = paperclipPublicUrl();
+  const mcp = mcpUrl();
   const picked = repos();
   if (picked.length) {
     lines.push(`- The user's ${picked.length > 1 ? 'repos are' : 'repo is'} cloned here, each with its own project in Paperclip, where its jobs run on Paperclip's own checkout of it:`);
@@ -409,7 +506,7 @@ function layerLines(ai) {
     lines.push(`- No repo is picked yet, and jobs need one: each job runs a skill from it, pulled before every run. Send the user to step 3 of ${setupPage} rather than wiring one yourself: it clones the repo here, connects it to Paperclip's project and wires the shared memory.`);
   }
   // Which agent runs jobs follows what is connected; the jobs script picks the same default (jobs.mjs, `create`).
-  const board = `Its dashboard is ${paperclipPublicUrl || "Paperclip's public URL"} (same login as here): give the user links to jobs and runs there; the scheduled-jobs script prints them.`;
+  const board = `Its dashboard is ${pcUrl || "Paperclip's public URL"} (same login as here): give the user links to jobs and runs there; the scheduled-jobs script prints them.`;
   if (claudeJobs && codexJobs) {
     lines.push(`- Scheduled jobs run in Paperclip, on its own checkout of the job's repo, by one of two agents: "Runner" (Claude Code, on the user's Claude account) or "Codex" (OpenAI's Codex, on the user's ChatGPT account). New jobs go to the Runner unless the user asks for Codex; then the scheduled-jobs skill's \`--agent Codex\` gives the job to it. Both read the same skill file in the repo. ${board}`);
   } else if (codexJobs) {
@@ -424,15 +521,18 @@ function layerLines(ai) {
   lines.push(ai === 'Codex'
     ? '- To list, create, change, pause, run or check jobs, use the `scheduled-jobs` skill: read `~/.claude/skills/scheduled-jobs/SKILL.md` first and follow it.'
     : '- To list, create, change, pause, run or check jobs, use the `scheduled-jobs` skill.');
+  lines.push(`- Jobs can also be managed from the user's own computer: an assistant there (Claude Code, Codex, others) connects to Paperclip's MCP server, ${mcp || "Paperclip's public URL + /mcp/paperclip"}, approves the connection in the browser with the same login, and gives Paperclip's "Scheduler" agent the scheduled-jobs commands. For Claude Code: \`${mcpCommand()}\`, then \`/mcp\`, paperclip, Authenticate. Other assistants: ${mcpSetupUrl() || "Paperclip's /mcp/setup page"}. Give this when the user asks how to use it from their computer.`);
+  lines.push("- Jobs made or changed outside the scheduled-jobs script (Paperclip's dashboard, an assistant through the MCP server) get the no-overlap and no-backlog rules and are recorded in their repo's `.claude/jobs.json` by this server within 5 minutes; `sync` records them at once.");
   const runs = claudeJobs && codexJobs ? 'Claude or Codex' : codexJobs ? 'Codex' : 'Claude';
-  lines.push(`- When the user greets you, asks what this is or what you can do, or seems unsure where to start, explain it in a few short lines. This server runs ${runs} on a schedule. They say in plain words what should be done and when; you write the job's instructions as a skill in their repo, schedule it in Paperclip and run it once to check. Paperclip then runs it on time and keeps every run: its status, what the agent did, and its usage, at ${paperclipPublicUrl || "Paperclip's address"} with the same login. They can also just work on their repo with you here, as with ${ai === 'Codex' ? 'Codex' : 'Claude Code'} anywhere. Then suggest two or three jobs that fit their repo (look at it first) and ask what they'd like.`);
+  lines.push(`- When the user greets you, asks what this is or what you can do, or seems unsure where to start, explain it in a few short lines. This server runs ${runs} on a schedule. They say in plain words what should be done and when; you write the job's instructions as a skill in their repo, schedule it in Paperclip and run it once to check. Paperclip then runs it on time and keeps every run: its status, what the agent did, and its usage, at ${pcUrl || "Paperclip's address"} with the same login. They can also just work on their repo with you here, as with ${ai === 'Codex' ? 'Codex' : 'Claude Code'} anywhere. Then suggest two or three jobs that fit their repo (look at it first) and ask what they'd like.`);
   lines.push(`- The user's time zone is ${timezone()}: new jobs use it unless the user names another.`);
   if (ai === 'Codex') {
     // CloudCLI runs Codex chats with `codex exec`, which refuses every approval request, and its workspace-write
-    // sandbox needs bubblewrap namespaces that Railway's containers deny: only Bypass Permissions runs anything.
-    lines.push('- Codex\'s sandbox can\'t start on this server (Railway\'s containers don\'t allow it), so in CloudCLI\'s Default and Accept Edits modes every command and file edit fails with "bwrap: Creating new namespace failed". When you see that, don\'t retry: tell the user to switch this chat to Bypass Permissions (the mode button under the message box) and send the message again. In Bypass Permissions nothing asks before it runs, so ask the user in the chat before anything destructive or beyond what they asked for: deleting files, force-pushing or rewriting git history, changing settings or accounts.');
+    // sandbox needs bubblewrap namespaces that Railway's containers deny: only Bypass Permissions runs anything. So
+    // Codex chats are off unless the user turns them on in step 1 of /setup, which says so and selects that mode.
+    lines.push(`- Codex chats on this server work only in CloudCLI's Bypass Permissions mode, where nothing asks before it runs: Codex's sandbox can't start here (Railway's containers don't allow it), so in the Default and Accept Edits modes every command and file edit fails with "bwrap: Creating new namespace failed". When you see that, don't retry. Tell the user that Codex chats here run without permission prompts, and that they turn them on in step 1 of ${setupPage} ("Codex chats in CloudCLI"), which selects that mode in their browser; if they are on already, they pick Bypass Permissions with the mode button under the message box. Then they send the message again. In Bypass Permissions, ask the user in the chat before anything destructive or beyond what they asked for: deleting files, force-pushing or rewriting git history, changing settings or accounts.`);
   }
-  lines.push(`- The setup page, ${setupPage} (same login as here), connects Claude, Codex and GitHub, adds repos and sets the time zone; every step can be redone there.`);
+  lines.push(`- The setup page, ${setupPage} (same login as here), connects Claude, Codex and GitHub, turns Codex chats on or off, adds repos and sets the time zone; every step can be redone there.`);
   return lines;
 }
 
